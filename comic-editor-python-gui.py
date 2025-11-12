@@ -3,12 +3,15 @@
 Comic Metadata Bulk Editor - Python GUI Version
 A tool to edit ComicInfo.xml metadata in CBZ/CBR files
 
-Version 2.10: Strong Column Separation
-- Increased the separator column minsize from 50 to 100 for a much clearer gap.
-- Added extra left padding to the right-side elements to enhance separation.
+Version 2.27: Formats & Manga Options
+- ENHANCEMENT: Added full list of ComicRack/ComicInfo 2.1 standard values for the 'Format' field.
+- ENHANCEMENT: Added 'YesAndRightToLeft' to the 'Manga' field options.
+- FIX: Ensured the 'Format' field uses a combobox for selection, not a free entry field.
+- Maintained: Robust merge logic and Date grouping from v2.26.
 """
 
 import os
+import sys 
 import zipfile
 import shutil
 import tempfile
@@ -20,6 +23,7 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import re 
 import time
 import datetime 
+import json 
 
 try:
     import rarfile
@@ -49,26 +53,19 @@ class ToolTip:
         if self.tip_window or not self.text:
             return
         
+        # Position the tooltip relative to the widget
+        x = self.widget.winfo_rootx() + self.widget.winfo_width()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height()
+        
         self.tip_window = tk.Toplevel(self.widget)
         self.tip_window.wm_overrideredirect(True) 
+        self.tip_window.wm_geometry(f"+{x}+{y}")
         
         label = tk.Label(self.tip_window, text=self.text, justify=tk.LEFT,
                          background="#ffffe0", relief=tk.SOLID, borderwidth=1,
                          font=("tahoma", "8", "normal"))
         label.pack(ipadx=1)
         
-        self.tip_window.update_idletasks()
-        
-        tooltip_height = self.tip_window.winfo_height()
-        widget_x = self.widget.winfo_rootx()
-        widget_y = self.widget.winfo_rooty()
-        
-        # Position the tooltip above the widget
-        x = widget_x + 10 
-        y = widget_y - tooltip_height - 5 
-        
-        self.tip_window.wm_geometry(f"+{x}+{y}")
-
     def hide_tip(self, event=None):
         if self.tip_window:
             self.tip_window.destroy()
@@ -78,6 +75,7 @@ class ToolTip:
 class ComicMetadataEditor:
     """Handles reading and writing ComicInfo.xml in comic archives"""
     
+    # Extensive mapping of internal keys to XML tags for ComicInfo v2.1
     FIELD_MAPPING = {
         'title': 'Title', 'series': 'Series', 'volume': 'Volume', 'number': 'Number',
         'issuecount': 'IssueCount', 'year': 'Year', 'month': 'Month', 'day': 'Day',
@@ -90,14 +88,15 @@ class ComicMetadataEditor:
         'tags': 'Tags', 'writer': 'Writer', 'penciller': 'Penciller', 'inker': 'Inker',
         'colorist': 'Colorist', 'letterer': 'Letterer', 'coverartist': 'CoverArtist', 
         'editor': 'Editor', 'authorsort': 'AuthorSort', 'summary': 'Summary', 
-        'maincharacter': 'MainCharacterOrTeam', 'characters': 'Characters', 
-        'teams': 'Teams', 'locations': 'Locations', 'notes': 'Notes', 'review': 'Review',
+        'maincharacter': 'MainCharacterOrTeam', 'characters': 'Characters', 'teams': 'Teams', 
+        'locations': 'Locations', 'notes': 'Notes', 'review': 'Review',
         'scaninformation': 'ScanInformation', 'web': 'Web',
         'communityrating': 'CommunityRating', 'gtin': 'GTIN', 'read': 'Read',
-        'country': 'Country'
+        'country': 'Country', 'pages': 'PageCount', 'isfolder': 'IsFolder'
     }
     
-    FIELD_MAPPING_REVERSE = {v: k for k, v in FIELD_MAPPING.items()}
+    # Reverse mapping for reading XML
+    REVERSE_MAPPING = {v: k for k, v in FIELD_MAPPING.items()}
     
     def __init__(self, file_path: str):
         self.file_path = Path(file_path)
@@ -107,69 +106,74 @@ class ComicMetadataEditor:
         if not (self.is_cbz or self.is_cbr):
             raise ValueError("File must be .cbz or .cbr")
 
-    def _parse_xml(self, xml_content: str) -> Dict[str, str]:
-        data = {}
-        try:
-            root = ET.fromstring(xml_content)
-            for elem in root:
-                if elem.tag in self.FIELD_MAPPING_REVERSE:
-                    key = self.FIELD_MAPPING_REVERSE[elem.tag]
-                    data[key] = elem.text or ""
-        except ET.ParseError as e:
-            print(f"Error parsing XML for {self.file_path}: {e}")
-        return data
-
-    def read_metadata_cbz(self) -> Dict[str, str]:
-        """Reads ComicInfo.xml from a CBZ file."""
-        try:
-            with zipfile.ZipFile(self.file_path, 'r') as zf:
-                xml_name = next((f for f in zf.namelist() if f.lower().endswith('comicinfo.xml')), None)
-                if xml_name:
-                    with zf.open(xml_name) as f:
-                        xml_content = f.read().decode('utf-8')
-                        return self._parse_xml(xml_content)
-        except zipfile.BadZipFile:
-            print(f"Bad zip file: {self.file_path}")
-        except Exception as e:
-            print(f"Error reading CBZ {self.file_path}: {e}")
-        return {}
-
-    def read_metadata_cbr(self) -> Dict[str, str]:
-        """Reads ComicInfo.xml from a CBR file."""
-        if not RARFILE_AVAILABLE:
-            return {}
-        try:
-            with rarfile.RarFile(self.file_path, 'r') as rf:
-                xml_name = next((f for f in rf.namelist() if f.lower().endswith('comicinfo.xml')), None)
-                if xml_name:
-                    with rf.open(xml_name) as f:
-                        xml_content = f.read().decode('utf-8')
-                        return self._parse_xml(xml_content)
-        except rarfile.BadRarFile:
-            print(f"Bad rar file: {self.file_path}")
-        except Exception as e:
-            print(f"Error reading CBR {self.file_path}: {e}")
-        return {}
-        
-    def read_metadata(self) -> Dict[str, str]:
+    def _read_xml_from_archive(self) -> Optional[str]:
+        """Reads ComicInfo.xml content from the archive."""
         if self.is_cbz:
-            return self.read_metadata_cbz()
-        elif self.is_cbr:
-            return self.read_metadata_cbr()
-        return {}
+            try:
+                with zipfile.ZipFile(self.file_path, 'r') as zf:
+                    xml_name = next((f for f in zf.namelist() if f.lower().endswith('comicinfo.xml')), None)
+                    if xml_name:
+                        return zf.read(xml_name).decode('utf-8')
+            except Exception as e:
+                pass
+        elif self.is_cbr and RARFILE_AVAILABLE:
+            try:
+                with rarfile.RarFile(self.file_path, 'r') as rf:
+                    xml_name = next((f for f in rf.namelist() if f.lower().endswith('comicinfo.xml')), None)
+                    if xml_name:
+                        return rf.read(xml_name).decode('utf-8')
+            except Exception as e:
+                pass
+        return None
+
+    def read_metadata(self) -> Dict[str, str]:
+        """Parses ComicInfo.xml content and returns a dictionary of metadata."""
+        xml_content = self._read_xml_from_archive()
+        metadata = {}
+        if xml_content:
+            try:
+                # ET.fromstring handles the root attributes like 'xmlns:xsi' 
+                root = ET.fromstring(xml_content)
+                for element in root:
+                    # Convert XML tag name (e.g., 'Title') to internal key (e.g., 'title')
+                    # Strip namespace prefix if present (e.g., '{http://namespace}Tag')
+                    tag = element.tag.split('}')[-1]
+                    internal_key = self.REVERSE_MAPPING.get(tag)
+                    
+                    if internal_key and element.text is not None:
+                        # Sanitize and store only non-empty strings
+                        text_val = element.text.strip()
+                        if text_val:
+                            metadata[internal_key] = text_val
+            except ET.ParseError as e:
+                print(f"XML Parse Error in {self.file_path}: {e}")
+        return metadata
 
     def _create_xml(self, metadata: Dict) -> str:
+        """Creates the ComicInfo XML string from a dictionary of metadata."""
+        # Filter metadata for non-empty/non-None values
         filtered_metadata = {
             k: v for k, v in metadata.items() 
             if v is not None and v is not False and (str(v).strip() or str(v) == '0')
         }
         
-        root = ET.Element('ComicInfo')
+        # Add required XML schema attributes to the root element
+        root = ET.Element(
+            'ComicInfo',
+            {
+                'xmlns:xsi': "http://www.w3.org/2001/XMLSchema-instance",
+                'xsi:noNamespaceSchemaLocation': "ComicInfo.xsd"
+            }
+        )
         root.text = '\n  '
         root.tail = '\n'
         
         last_elem = None
-        for key in sorted(filtered_metadata.keys()):
+        
+        # Sort keys based on XML tag name for consistent XML file structure
+        sorted_keys = sorted(filtered_metadata.keys(), key=lambda k: self.FIELD_MAPPING.get(k, k))
+        
+        for key in sorted_keys:
             value = filtered_metadata[key]
             if key in self.FIELD_MAPPING:
                 xml_tag = self.FIELD_MAPPING[key]
@@ -181,934 +185,671 @@ class ComicMetadataEditor:
         if last_elem is not None:
             last_elem.tail = '\n'
         
-        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n'
-        xml_str += ET.tostring(root, encoding='unicode')
-        return xml_str
-    
-    def _write_file_to_archive(self, file_path: Path, new_content: Optional[str] = None) -> bool:
-        temp_path = ""
-        try:
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.cbz')
-            temp_path = temp_file.name
-            temp_file.close()
-            
-            with zipfile.ZipFile(file_path, 'r') as zf_in:
-                with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zf_out:
-                    xml_name = next((f.filename for f in zf_in.infolist() if f.filename.lower().endswith('comicinfo.xml')), None)
-                    
-                    for item in zf_in.infolist():
-                        if item.filename != xml_name:
-                            data = zf_in.read(item.filename)
-                            zf_out.writestr(item, data)
-                    
-                    if new_content:
-                        zf_out.writestr('ComicInfo.xml', new_content)
-            
-            shutil.move(temp_path, file_path)
-            return True
-        except zipfile.BadZipFile:
-            print(f"Bad zip file for modification: {file_path}")
-            return False
-        except Exception as e:
-            print(f"Error modifying archive {file_path}: {e}")
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            return False
+        # Convert the ElementTree to a string
+        xml_str = ET.tostring(root, encoding='utf-8', short_empty_elements=True, xml_declaration=False).decode('utf-8')
+        
+        # Add XML declaration and return
+        return '<?xml version="1.0" encoding="utf-8"?>\n' + xml_str
 
-    def write_metadata_cbz(self, metadata: Dict) -> bool:
+    def write_metadata(self, metadata: Dict) -> Optional[str]:
+        """Writes new ComicInfo.xml into the archive, returning the new file path if successful (for CBR->CBZ conversion)."""
         xml_content = self._create_xml(metadata)
-        return self._write_file_to_archive(self.file_path, xml_content)
-
-    def write_metadata_cbr(self, metadata: Dict) -> Optional[Path]:
-        if not RARFILE_AVAILABLE: return None
-        temp_dir = ""
+        
+        temp_dir = Path(tempfile.mkdtemp())
+        temp_xml_path = temp_dir / 'ComicInfo.xml'
+        
         try:
-            xml_content = self._create_xml(metadata)
-            temp_dir = tempfile.mkdtemp()
-            temp_cbz = os.path.join(temp_dir, 'temp.cbz')
+            # 1. Write XML to a temporary file
+            with open(temp_xml_path, 'w', encoding='utf-8') as f:
+                f.write(xml_content)
             
-            with rarfile.RarFile(self.file_path, 'r') as rf:
-                with zipfile.ZipFile(temp_cbz, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    xml_name = next((f.filename for f in rf.infolist() if f.filename.lower().endswith('comicinfo.xml')), None)
-                    for item in rf.infolist():
-                        if not item.filename.endswith('/') and item.filename != xml_name:
-                            data = rf.read(item.filename)
-                            zf.writestr(item.filename, data)
-                    zf.writestr('ComicInfo.xml', xml_content)
+            # 2. Update the archive
+            new_file_path = str(self.file_path) # Default to original path
             
-            new_path = self.file_path.with_suffix('.cbz')
-            shutil.move(temp_cbz, new_path)
-            if self.file_path.exists(): os.unlink(self.file_path)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return new_path
-        except Exception as e:
-            print(f"Error writing metadata to {self.file_path}: {e}")
-            if temp_dir and os.path.exists(temp_dir): shutil.rmtree(temp_dir, ignore_errors=True)
-            return None
-    
-    def write_metadata(self, metadata_from_gui: Dict) -> Optional[str]:
-        existing_data = self.read_metadata()
-        final_data = existing_data
-        final_data.update(metadata_from_gui)
-        
-        if self.is_cbz:
-            if self.write_metadata_cbz(final_data):
-                return str(self.file_path)
-        elif self.is_cbr:
-            new_path = self.write_metadata_cbr(final_data)
-            if new_path:
-                return str(new_path)
+            if self.is_cbz:
+                # CBZ (ZIP) - Safely update by copying and overwriting
+                temp_archive = temp_dir / self.file_path.name
+                shutil.copy2(self.file_path, temp_archive)
                 
-        return None
-    
-    def delete_metadata(self) -> Optional[str]:
-        if self.is_cbz:
-            if self._write_file_to_archive(self.file_path, new_content=None):
-                return str(self.file_path)
-        elif self.is_cbr:
-            if not RARFILE_AVAILABLE: return None
-            temp_dir = ""
-            try:
-                temp_dir = tempfile.mkdtemp()
-                temp_cbz = os.path.join(temp_dir, 'temp.cbz')
+                with zipfile.ZipFile(temp_archive, 'a') as zf_temp:
+                    # Write the new/updated XML, overwriting the old one if it exists
+                    zf_temp.write(temp_xml_path, 'ComicInfo.xml')
                 
+                # Overwrite the original file with the updated temporary file
+                shutil.move(temp_archive, self.file_path)
+
+            elif self.is_cbr and RARFILE_AVAILABLE:
+                # CBR (RAR) - Must convert to CBZ (ZIP)
+                
+                # Create a list of files in the RAR archive to copy (excluding existing XML)
+                file_list = []
                 with rarfile.RarFile(self.file_path, 'r') as rf:
-                    with zipfile.ZipFile(temp_cbz, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        xml_name = next((f.filename for f in rf.infolist() if f.filename.lower().endswith('comicinfo.xml')), None)
-                        for item in rf.infolist():
-                            if not item.filename.endswith('/') and item.filename != xml_name:
-                                data = rf.read(item.filename)
-                                zf.writestr(item.filename, data)
+                    for f in rf.namelist():
+                        if not f.lower().endswith('comicinfo.xml'):
+                            file_list.append(f)
+                    
+                    # Create new CBZ path
+                    new_file_path = str(self.file_path).replace('.cbr', '.cbz').replace('.CBR', '.CBZ')
+                    if os.path.exists(new_file_path):
+                        os.remove(new_file_path) # Remove previous version if exists
+                        
+                    # Create the new CBZ archive
+                    with zipfile.ZipFile(new_file_path, 'w', zipfile.ZIP_DEFLATED) as zf_new:
+                        # Add the new ComicInfo.xml
+                        zf_new.write(temp_xml_path, 'ComicInfo.xml')
+                        
+                        # Add all original files from RAR
+                        for f in file_list:
+                            # Extract to temp, then add to zip
+                            temp_file = rf.extract(f, temp_dir)
+                            zf_new.write(temp_file, f)
+                            os.remove(temp_file) # Clean up temp file
+                            
+                # Delete the old CBR file
+                os.remove(self.file_path)
                 
-                new_path = self.file_path.with_suffix('.cbz')
-                shutil.move(temp_cbz, new_path)
-                if self.file_path.exists(): os.unlink(self.file_path)
+            else:
+                raise ValueError("CBR is not supported (rarfile missing)")
+                
+            return new_file_path
+
+        except Exception as e:
+            print(f"Error writing XML to archive {self.file_path}: {e}")
+            return None
+            
+        finally:
+            # Clean up temporary directory
+            if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                return str(new_path)
-            except Exception as e:
-                print(f"Error deleting metadata from {self.file_path}: {e}")
-                if temp_dir and os.path.exists(temp_dir): shutil.rmtree(temp_dir, ignore_errors=True)
-                return None
-
-        return None
 
 
-TOOLTIPS = {
-    'series': "The title of the series (e.g., 'Land of the Lustrous').",
-    'title': "The specific title of the issue (e.g., 'Volume 1').",
-    'volume': "The volume number of the series this issue belongs to.",
-    'number': "The issue number within the volume.",
-    'issuecount': "The total number of issues in the volume (optional).",
-    'year': "The year the issue was published.",
-    'month': "The month the issue was published (1-12).",
-    'day': "The day the issue was published (1-31).",
-    'alternateSeries': "Title of an alternate or parallel series.",
-    'alternatenumber': "Issue number in the alternate series.",
-    'alternateissuecount': "Total number of issues in the alternate series.",
-    'storyArc': "The name of the current story arc.",
-    'seriesgroup': "The name of a larger group/universe the series belongs to.",
-    'seriescomplete': "Is this series considered complete? (Yes/No).",
-    'volume_count': "Total number of volumes in the series (optional).",
-    'format': "The format of the comic (e.g., 'Oneshot', 'Trade Paperback').",
-    'agerating': "The intended maturity rating (e.g., 'Teen', 'Mature').",
-    'manga': "Is this Manga? (Yes/No/YesAndRightToLeft).",
-    'publisher': "The publisher (e.g., 'Marvel Comics', 'Kodansha').",
-    'imprint': "The specific imprint of the publisher.",
-    'blackandwhite': "Is this a black and white comic?",
-    'language': "The language of the comic (e.g., 'en', 'de').",
-    'genre': "The primary genre (e.g., 'Sci-Fi', 'Fantasy').",
-    'tags': "Comma-separated list of keywords/tags.",
-    'writer': "The writer(s) of the story.",
-    'penciller': "The penciller(s) or line artist(s).",
-    'inker': "The inker(s).",
-    'colorist': "The colorist(s).",
-    'letterer': "The letterer(s).",
-    'coverartist': "The cover artist(s).",
-    'editor': "The editor(s).",
-    'authorsort': "A key used for sorting by author (e.g., LastName, FirstName).",
-    'summary': "A brief summary or description of the plot.",
-    'maincharacter': "The main character or team.",
-    'characters': "A list of other characters appearing.",
-    'teams': "A list of teams/groups appearing.",
-    'locations': "Key locations where the story takes place.",
-    'notes': "Any private notes or internal information.",
-    'review': "A public review or rating text.",
-    'scaninformation': "Information about the scan or digital source.",
-    'web': "Official website or link related to the comic.",
-    'communityrating': 'A community rating (0-5 stars).',
-    'gtin': 'Global Trade Item Number (e.g., ISBN or UPC).',
-    'read': "Reading status (Yes/No).",
-    'country': 'Country of origin/publication.'
-}
-
-class ComicMetadataGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Comic Metadata Bulk Editor (v2.10 - Starke Spalten-Trennung)")
-        self.root.geometry("1200x900") 
-        
-        # --- Core State & Data ---
-        # metadata stores: {'key': {'var': tk.BooleanVar, 'widget': tk.Widget}}
-        self.metadata: Dict[str, Dict] = {} 
-        # files stores a list of full paths of loaded files
-        self.files: List[str] = [] 
-        # file_script_status maps full path -> bool (True if modified in this session)
-        self.file_script_status: Dict[str, bool] = {} 
-        
-        # --- UI Widgets (Initialized later in setup_ui) ---
-        self.file_listbox: Optional[ttk.Treeview] = None 
-        self.status_label: Optional[ttk.Label] = None
-        self.btn_apply: Optional[ttk.Button] = None
-        self.progress_bar: Optional[ttk.Progressbar] = None
-
-        # --- Status & Flags ---
-        self._explanation_shown: bool = False
-        
-        self.setup_ui()
-        self.show_startup_explanation()
+class MetadataViewer:
+    """A secondary window to display the existing metadata of a single comic file."""
     
-    # --- UI Setup and Layout ---
+    FIELD_MAP = ComicMetadataEditor.FIELD_MAPPING
     
-    def setup_ui(self):
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
+    def __init__(self, master, metadata: Dict[str, str], file_path: str):
+        self.master = master
+        self.metadata = metadata
+        self.file_path = file_path
         
-        title = ttk.Label(main_frame, text="Comic Metadata Bulk Editor", 
-                         font=('Arial', 16, 'bold'))
-        title.grid(row=0, column=0, columnspan=2, pady=10)
+        self.string_vars = {} 
         
-        # --- File Selection and List Frame (Row 1) ---
-        file_frame = ttk.LabelFrame(main_frame, text="Files", padding="10")
-        file_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        
-        # Make the file_frame resizable (Vertical weight 1)
-        main_frame.rowconfigure(1, weight=1) 
-        
-        btn_frame = ttk.Frame(file_frame)
-        btn_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
-        
-        ttk.Button(btn_frame, text="Select Files", 
-                  command=self.select_files).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Select Folder", 
-                  command=self.select_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Select All", 
-                  command=self.select_all).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Deselect All", 
-                  command=self.deselect_all).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Remove Selected", 
-                  command=self.remove_selected).pack(side=tk.LEFT, padx=5)
-        
-        list_frame = ttk.Frame(file_frame)
-        list_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        file_frame.columnconfigure(0, weight=1)
-        file_frame.rowconfigure(1, weight=1) # Make the list_frame resizable
-        
-        # --- Treeview Setup ---
-        self.file_listbox = self.setup_treeview(list_frame)
-        
-        self.status_label = ttk.Label(file_frame, text="0 files loaded, 0 selected")
-        self.status_label.grid(row=2, column=0, sticky=tk.W, pady=5)
-        
-        # --- Metadata Notebook (Tabs) (Row 2) ---
-        notebook = ttk.Notebook(main_frame)
-        # Row 2 is NOT configured with weight=1, allowing Row 1 (File List) to take the majority of the extra space.
-        notebook.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        main_frame.columnconfigure(0, weight=1)
-        
-        tab1 = ttk.Frame(notebook)
-        notebook.add(tab1, text="Main Information")
-        self.create_main_info_tab(tab1) 
-        
-        tab2 = ttk.Frame(notebook)
-        notebook.add(tab2, text="Artists & People")
-        self.create_people_tab(tab2) 
-        
-        tab3 = ttk.Frame(notebook)
-        notebook.add(tab3, text="Plot & Notes")
-        self.create_plot_tab(tab3) 
-        
-        tab4 = ttk.Frame(notebook)
-        notebook.add(tab4, text="Format & Details")
-        self.create_format_tab(tab4) 
-        
-        # --- Utility Toolbar (Row 3) ---
-        self.setup_toolbar(main_frame) 
-        
-        # --- Apply/Progress Bar Frame (Row 4) ---
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
-        bottom_frame.columnconfigure(0, weight=1)
-
-        self.btn_apply = ttk.Button(bottom_frame, text="Apply Metadata to Selected Files",
-                              command=self.apply_metadata)
-        self.btn_apply.grid(row=0, column=0, sticky=tk.E, padx=5)
-
-        self.progress_bar = ttk.Progressbar(bottom_frame, orient='horizontal', mode='determinate')
-        self.progress_bar.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 220))
-        self.progress_bar['value'] = 0
-
-    def setup_treeview(self, parent_frame):
-        """Sets up the Treeview widget with custom columns."""
-        
-        scrollbar = ttk.Scrollbar(parent_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        tree = ttk.Treeview(parent_frame, columns=('last_changed', 'script_changed'), 
-                            show='tree headings', selectmode='extended', 
-                            yscrollcommand=scrollbar.set)
-        
-        tree.heading('#0', text='File Name', anchor=tk.W)
-        tree.column('#0', width=600, anchor=tk.W, stretch=tk.YES)
-        
-        tree.heading('last_changed', text='Last Changed', anchor=tk.W)
-        tree.column('last_changed', width=180, anchor=tk.W, stretch=tk.NO)
-        
-        tree.heading('script_changed', text='Script Changed', anchor=tk.CENTER)
-        tree.column('script_changed', width=120, anchor=tk.CENTER, stretch=tk.NO)
-        
-        tree.bind('<<TreeviewSelect>>', lambda e: self.update_status())
-        tree.tag_configure('modified', background='#e0ffe0') 
-        
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=tree.yview)
-        
-        return tree
-        
-    def setup_toolbar(self, parent_frame):
-        """Sets up the toolbar at the new location (below the notebook, row 3)."""
-        toolbar_frame = ttk.Frame(parent_frame, padding="5 5 5 5", relief=tk.RIDGE)
-        toolbar_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-        
-        ttk.Label(toolbar_frame, text="Utility Toolbar:").pack(side=tk.LEFT, padx=5)
-
-        btn_clear = ttk.Button(toolbar_frame, text="Clear ALL Fields", 
-                               command=self.clear_all_fields)
-        btn_clear.pack(side=tk.LEFT, padx=15, pady=0)
-        ToolTip(btn_clear, "Clears all text/value fields in the tabs (keeps checkboxes unchecked).")
-
-        ttk.Separator(toolbar_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        self.top = tk.Toplevel(master)
+        self.top.title(f"Metadata Viewer: {os.path.basename(file_path)}")
+        self.top.resizable(True, True)
+        self.top.grab_set() 
 
         style = ttk.Style()
-        style.configure('Danger.TButton', foreground='red', font=('Arial', 10, 'bold'))
-        btn_delete = ttk.Button(toolbar_frame, text="DELETE Metadata from File", 
-                                command=self.delete_metadata_from_selected_files,
-                                style='Danger.TButton')
-        btn_delete.pack(side=tk.LEFT, padx=15, pady=0)
-        ToolTip(btn_delete, "REMOVES the ComicInfo.xml file from all selected archives. DANGEROUS!")
-
-    # --- Reintegrated Metadata Widget Creation (Essential for startup) ---
-
-    def _create_metadata_widget(self, parent_frame, key, label_text, row, col, widget_type='entry', widget_opts=None, columnspan=3, row_span=1):
-        """
-        Creates the label, control checkbox, and input widget for a metadata field.
-        The layout uses: Checkbox (col), Label (col+1), Widget (col+2 to col+columnspan-1).
-        """
-        # --- Checkbox and Label ---
-        check_var = tk.BooleanVar(value=False)
-        self.metadata[key] = {'var': check_var} 
+        style.configure("Viewer.TFrame", background="#f0f0f0")
         
-        # Custom padding for separation
-        check_padx = (5, 0)
-        label_padx = (5, 5)
-        
-        # If it's the right column (col=3), add extra left padding to the checkbox
-        if col == 3:
-            check_padx = (20, 0) 
+        main_frame = ttk.Frame(self.top, padding="10", style="Viewer.TFrame")
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-        check_box = ttk.Checkbutton(parent_frame, variable=check_var)
-        check_box.grid(row=row, column=col, sticky=tk.W, padx=check_padx, pady=4, rowspan=row_span)
-        ToolTip(check_box, f"Tick this box to INCLUDE the value of the '{label_text}' field when writing metadata. If unticked, the original file's value is PRESERVED.")
-
-        label = ttk.Label(parent_frame, text=label_text)
-        label.grid(row=row, column=col + 1, sticky=tk.W, padx=label_padx, pady=4, rowspan=row_span)
+        ttk.Label(main_frame, text="Current Metadata (Read-Only)", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        ttk.Label(main_frame, text=f"Source: {os.path.basename(file_path)}", font=("Arial", 9, "italic")).pack(pady=(0, 5))
         
-        # --- Input Widget ---
-        input_widget = None
-        widget_opts = widget_opts or {}
+        # --- Canvas and Scrollbar Setup (The Scrollable Area) ---
+        canvas_frame = ttk.Frame(main_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
         
-        if widget_type == 'entry':
-            input_widget = ttk.Entry(parent_frame, width=30) 
-        elif widget_type == 'spinbox':
-            input_widget = ttk.Spinbox(parent_frame, width=28, **widget_opts) 
-        elif widget_type == 'combobox':
-            input_widget = ttk.Combobox(parent_frame, width=28, **widget_opts) 
-        elif widget_type == 'scrolledtext':
-            # ScrolledText needs a frame wrapper for proper grid/pack interaction
-            text_frame = ttk.Frame(parent_frame)
-            # ScrolledText spans all 7 columns (0 to 6)
-            text_frame.grid(row=row + 1, column=0, columnspan=7, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=4)
-            input_widget = scrolledtext.ScrolledText(text_frame, height=5, wrap=tk.WORD)
-            input_widget.pack(fill=tk.BOTH, expand=True)
-            parent_frame.rowconfigure(row + 1, weight=1) 
-            
-        if input_widget:
-            if widget_type != 'scrolledtext':
-                # Input widget placement adjusted for the new 7-column layout (0-6):
-                # Left Column starts at col=0, widget at col=2, spans 1 (column 2)
-                # Right Column starts at col=3, widget at col=5, spans 2 (columns 5 and 6)
-                if col == 0:
-                     # Left column widget, spans 1 column
-                     input_widget.grid(row=row, column=col + 2, sticky=(tk.W, tk.E), padx=(0, 10), pady=4, columnspan=1, rowspan=row_span)
-                elif col == 3:
-                     # Right column widget, spans 2 columns (col 5 & 6)
-                     input_widget.grid(row=row, column=col + 2, sticky=(tk.W, tk.E), padx=(0, 10), pady=4, columnspan=2, rowspan=row_span)
-                
-            self.metadata[key]['widget'] = input_widget
-            if key in TOOLTIPS:
-                ToolTip(label, TOOLTIPS[key])
-                if widget_type != 'scrolledtext':
-                    ToolTip(input_widget, TOOLTIPS[key])
+        # We must use tk.Canvas for proper cross-platform scrolling within a Toplevel window
+        canvas = tk.Canvas(canvas_frame, borderwidth=0)
+        v_scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
         
-        return input_widget
+        v_scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=v_scrollbar.set)
+        
+        scrollable_frame = ttk.Frame(canvas, padding="5 0 5 0")
 
-    def _create_scrollable_tab(self, tab):
-        """Standard boilerplate for creating a scrollable frame within a tab."""
-        canvas = tk.Canvas(tab, borderwidth=0)
-        scrollbar = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas, padding="10")
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
+        def _on_frame_configure(event):
+            # This is critical for the scrollbar to know the size of the inner frame
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        scrollable_frame.bind("<Configure>", _on_frame_configure)
         
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # --- End Canvas Setup ---
+
+        self.create_widgets(scrollable_frame)
+        self.show_metadata()
+
+        # Footer
+        footer = ttk.Frame(main_frame)
+        footer.pack(fill='x', pady=10)
+        ToolTip(footer, "Clicking a value copies it to your clipboard. Hovering highlights the text.")
+        ttk.Label(footer, text="Click value to copy to clipboard", font=("Arial", 8, "italic"), foreground="gray").pack(side=tk.LEFT)
+        ttk.Button(footer, text="Close", command=self.top.destroy).pack(side=tk.RIGHT)
+
+        # Center the window
+        self.top.update_idletasks()
+        master_x = master.winfo_x()
+        master_y = master.winfo_y()
+        master_w = master.winfo_width()
+        top_w = self.top.winfo_width()
+
+        x = master_x + (master_w // 2) - (top_w // 2)
+        y = master_y + 50 # Slightly offset from master top
+
+        self.top.geometry(f"+{x}+{y}")
+
+
+    def create_widgets(self, parent):
+        """Creates label/value pairs for all possible fields."""
         
+        ordered_keys = sorted(self.FIELD_MAP.keys(), key=lambda k: self.FIELD_MAP[k])
+        
+        row_idx = 0
+        
+        parent.grid_columnconfigure(0, weight=0) 
+        parent.grid_columnconfigure(1, weight=1) 
+        
+        # Define hover colors
+        NORMAL_BG = "#ffffff"
+        HOVER_BG = "#e0e0ff" # Light blue background
+        NORMAL_FG = "#000000" # Black text
+        HOVER_FG = "#0000FF" # Blue text
+        
+        for internal_key in ordered_keys:
+            # Skip keys that are usually calculated
+            if internal_key in ['pages', 'isfolder']:
+                continue 
+
+            xml_tag = self.FIELD_MAP.get(internal_key, internal_key)
+
+            ttk.Label(parent, text=f"{xml_tag}:", font=("Arial", 9, "bold")).grid(row=row_idx, column=0, sticky=tk.W, padx=5, pady=2)
+            
+            var = tk.StringVar(parent)
+            self.string_vars[internal_key] = var 
+
+            value_label = ttk.Label(parent, textvariable=var, wraplength=400, justify=tk.LEFT, 
+                                    background=NORMAL_BG, foreground=NORMAL_FG, 
+                                    relief=tk.FLAT, anchor=tk.NW)
+            value_label.grid(row=row_idx, column=1, sticky=tk.W + tk.E + tk.N + tk.S, padx=5, pady=2, ipadx=5, ipady=2)
+            
+            # --- BINDING: Pass the StringVar and the Label widget ---
+            def _copy_bind(var_ref, label_ref):
+                # The lambda function captures the current references
+                return lambda e: self._copy_to_clipboard(var_ref, label_ref)
+
+            value_label.bind("<Button-1>", _copy_bind(var, value_label))
+            # ----------------------------------------------------------------
+
+            # Hover feedback (background and foreground change)
+            value_label.bind("<Enter>", lambda e, l=value_label: l.config(background=HOVER_BG, foreground=HOVER_FG))
+            value_label.bind("<Leave>", lambda e, l=value_label: l.config(background=NORMAL_BG, foreground=NORMAL_FG))
+            
+            parent.grid_rowconfigure(row_idx, weight=1) 
+            
+            row_idx += 1
+
+    def show_metadata(self):
+        """Populates the StringVars with the actual metadata values."""
+        
+        for key in self.string_vars:
+            self.string_vars[key].set("(Not Set)")
+        
+        for key, value in self.metadata.items():
+            if key in self.string_vars:
+                display_value = str(value).strip() if value else "(Not Set)"
+                self.string_vars[key].set(display_value)
+
+    def _copy_to_clipboard(self, var: tk.StringVar, label_widget: ttk.Label):
+        """Copies the given text to the clipboard and shows visual confirmation."""
+        text = var.get()
+        if text and text != "(Not Set)":
+            self.top.clipboard_clear()
+            self.top.clipboard_append(text)
+            self.top.update() 
+
+            # --- Visual Confirmation ---
+            original_display_text = text # Store original text for revert
+            
+            # Use the existing StringVar for the text, so the label updates automatically
+            CONFIRM_TEXT = "🚀 Copied to Clipboard! (Ctrl+C on that thang!)"
+            CONFIRM_FG = "#006400" # Dark Green
+            CONFIRM_BG = "#ccffcc" # Light Green
+            
+            # Temporarily change label properties
+            label_widget.config(text=CONFIRM_TEXT, foreground=CONFIRM_FG, background=CONFIRM_BG, font=("Arial", 9, "bold"))
+
+            def revert():
+                # Revert to original text and colors (using the standard colors from create_widgets)
+                # We check the current text to avoid reverting if the user immediately hovers away and the Enter binding resets the color
+                if label_widget.cget("text") == CONFIRM_TEXT:
+                    label_widget.config(text=original_display_text, 
+                                        foreground="#000000", 
+                                        background="#ffffff", 
+                                        font=("Arial", 9, "normal"))
+                
+            # Schedule the revert function to run after 750 milliseconds
+            self.top.after(750, revert)
+            # --- End Visual Confirmation ---
+
+
+class ComicMetadataGUI:
+    """The main application window and logic controller."""
+    
+    METADATA_FIELDS = ComicMetadataEditor.FIELD_MAPPING
+
+    # --- Standard Lists for Comboboxes ---
+    ISO_LANGUAGES = [
+        'en (English)', 'es (Spanish)', 'fr (French)', 'de (German)', 
+        'ja (Japanese)', 'ko (Korean)', 'zh (Chinese)', 'it (Italian)', 
+        'ru (Russian)', 'pt (Portuguese)', 'nl (Dutch)', 'pl (Polish)',
+        'sv (Swedish)', 'fi (Finnish)', 'nb (Norwegian)', 'da (Danish)',
+        'la (Latin)', 'ar (Arabic)', 'tr (Turkish)', 'he (Hebrew)'
+    ]
+    
+    COMMON_COUNTRIES = [
+        'USA', 'UK', 'Canada', 'Australia', 'New Zealand', 'France', 'Germany', 
+        'Spain', 'Italy', 'Japan', 'South Korea', 'China', 'Brazil', 'Mexico',
+        'Argentina', 'India', 'Russia'
+    ]
+    
+    AGE_RATINGS = [
+        '', 'Adults Only', 'Early Childhood', 'Everyone', 'Everyone 10+', 'G', 
+        'Kids', 'M', 'MA15+', 'Mature', 'PG', 'PG-13', 'Teen', 'T+', 'X', 'Young Adult'
+    ]
+    
+    # UPDATED: Added YesAndRightToLeft 
+    MANGA_TYPES = ['', 'Yes', 'No', 'Seinen', 'Shoujo', 'Shonen', 'Josei', 'Kodomo', 'YesAndRightToLeft']
+    
+    # NEW: Added full list of ComicInfo standard formats
+    COMMON_FORMATS = [
+        '', 'Digital', 'Print', 'Hardcover', 'Softcover', 'Trade Paperback', 'Graphic Novel',
+        'Magazine', 'Fanzine', 'Web Comic', 'Anthology', 'Collected Edition', 'TPB'
+    ]
+    # -----------------------------------
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Comic Metadata Bulk Editor - v2.27 (Formats & Manga Options)")
+        
+        self.files: List[str] = []
+        self.control_vars: Dict[str, tk.Variable] = {}
+        self.input_widgets: Dict[str, tk.Widget] = {} 
+        
+        self._setup_styles()
+        self._setup_main_layout()
+        self._create_metadata_tab() # Single, consolidated tab
+        
+        self.show_welcome_message()
+        
+    def _setup_styles(self):
+        """Configure Ttk styles."""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        style.configure("List.TFrame", padding="10") 
+        style.configure("Sash.TPanedwindow", sashwidth=8, sashrelief='groove', background="#CCCCCC")
+        
+        style.configure('TButton', font=('Arial', 10), padding=5)
+        style.map('TButton', background=[('active', '#e0e0e0')])
+
+    def _setup_main_layout(self):
+        """Create the paned window and the overall structure."""
+        
+        main_frame = ttk.Frame(self.root, padding="5")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.paned_window = ttk.Panedwindow(main_frame, orient=tk.HORIZONTAL, style="Sash.TPanedwindow")
+        self.paned_window.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # --- Left Pane: File List and Controls ---
+        left_pane = ttk.Frame(self.paned_window, style="List.TFrame")
+        self.paned_window.add(left_pane, weight=1) # File List Pane (smaller)
+
+        # --- Right Pane: Notebook (Tabs) ---
+        self.notebook = ttk.Notebook(self.paned_window)
+        self.paned_window.add(self.notebook, weight=3) # Metadata Pane (3x larger)
+
+        self.scrollable_frames = {}
+        self._create_left_pane(left_pane)
+        
+    def _create_left_pane(self, parent):
+        """Build the file list, controls, and status bar."""
+        
+        list_frame = ttk.Frame(parent)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        
+        ttk.Label(list_frame, text="Loaded Comic Files:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+
+        listbox_vscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        listbox_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.file_listbox = tk.Listbox(
+            list_frame, 
+            selectmode=tk.EXTENDED, 
+            height=15, 
+            yscrollcommand=listbox_vscroll.set,
+            exportselection=False, 
+            font=("Arial", 9)
+        )
+        self.file_listbox.pack(fill=tk.BOTH, expand=True)
+        listbox_vscroll.config(command=self.file_listbox.yview)
+        
+        self.file_listbox.bind('<<ListboxSelect>>', self.on_file_select)
+        
+        button_frame = ttk.Frame(parent)
+        button_frame.pack(fill=tk.X, pady=5)
+        
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+
+        ttk.Button(button_frame, text="Add Files...", command=self.add_files).grid(row=0, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
+        ttk.Button(button_frame, text="Remove Selected", command=self.remove_selected).grid(row=0, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
+        ttk.Button(button_frame, text="View Metadata", command=self.load_metadata).grid(row=1, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
+        
+        self.btn_apply = ttk.Button(button_frame, text="APPLY METADATA to Selected", command=self.apply_metadata, style='Accent.TButton')
+        self.btn_apply.grid(row=1, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
+        
+        self.status_bar = ttk.Label(parent, text="Ready. Load files to begin.", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(fill=tk.X, ipady=2, pady=(5, 0))
+        
+        self.progress_bar = ttk.Progressbar(parent, orient="horizontal", length=100, mode="determinate")
+        self.progress_bar.pack(fill=tk.X, pady=(0, 5))
+        self.progress_bar.pack_forget() 
+
+        self.update_status()
+
+    def _on_mousewheel(self, event, canvas):
+        """Universal scroll wheel binding for a canvas."""
+        # Windows and Linux use <MouseWheel> with a delta. macOS uses <Button-4>/<Button-5> (which appear as <MouseWheel> events with different deltas).
+        
+        # Determine scroll units based on OS/Event details
+        if sys.platform.startswith('win'):
+            # Windows: event.delta is typically +/- 120 per click
+            scroll_delta = int(-1 * (event.delta / 120))
+        elif sys.platform.startswith('linux') or sys.platform == 'darwin':
+            # Linux/macOS: event.delta is usually not available, but Button-4/5 are sometimes mapped to <MouseWheel>
+            # For simplicity and cross-platform compatibility, we'll use a fixed scroll amount for non-Windows:
+            if event.num == 4: # Button-4 (Scroll Up)
+                scroll_delta = -1
+            elif event.num == 5: # Button-5 (Scroll Down)
+                scroll_delta = 1
+            elif event.delta < 0: # Modern Linux/macOS
+                scroll_delta = 1
+            else:
+                scroll_delta = -1
+        else:
+            # Fallback for others
+            scroll_delta = -1 if event.delta > 0 else 1
+            
+        canvas.yview_scroll(scroll_delta, "units")
+
+    def _create_metadata_tab_frame(self, tab_name):
+        """Helper to create a scrollable frame within a new notebook tab."""
+        
+        tab_frame = ttk.Frame(self.notebook)
+        self.notebook.add(tab_frame, text=tab_name)
+        
+        canvas = tk.Canvas(tab_frame, borderwidth=0)
+        v_scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+        v_scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=v_scrollbar.set)
         
-        # Configure the grid in the scrollable frame for 7 columns:
-        # Col 0: Checkbox (Left)
-        # Col 1: Label (Left)
-        # Col 2: Widget (Left) - Takes weight 1
-        # Col 3: Separator (Spacer) - Increased minsize for strong separation
-        # Col 4: Checkbox (Right)
-        # Col 5: Label (Right)
-        # Col 6: Widget (Right) - Takes weight 1
+        scrollable_frame = ttk.Frame(canvas, padding="10")
         
-        scrollable_frame.columnconfigure(2, weight=1) # Left widget column
-        scrollable_frame.columnconfigure(3, minsize=100) # **Physical Separator Column (Increased)**
-        scrollable_frame.columnconfigure(6, weight=1) # Right widget column
+        def _on_frame_configure(event):
+            # Ensure the canvas view is properly set and includes the minimum width 
+            # for the content to fully stretch.
+            canvas.configure(scrollregion=canvas.bbox("all"), width=scrollable_frame.winfo_width())
         
+        scrollable_frame.bind("<Configure>", _on_frame_configure)
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        
+        # --- SCROLL WHEEL BINDING (Cross-Platform) ---
+        canvas.bind("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas))
+        # This is for X11/macOS compatibility for scroll up/down
+        canvas.bind("<Button-4>", lambda e: self._on_mousewheel(e, canvas)) 
+        canvas.bind("<Button-5>", lambda e: self._on_mousewheel(e, canvas))
+        # Bind events to the inner frame as well, so it works when the cursor is over a widget inside
+        scrollable_frame.bind("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas))
+        scrollable_frame.bind("<Button-4>", lambda e: self._on_mousewheel(e, canvas)) 
+        scrollable_frame.bind("<Button-5>", lambda e: self._on_mousewheel(e, canvas))
+
+        self.scrollable_frames[tab_name] = scrollable_frame
         return scrollable_frame
 
-    def create_main_info_tab(self, tab):
-        scrollable_frame = self._create_scrollable_tab(tab)
-
-        # Left Column (Core Info) - Uses columns 0, 1, 2
-        self._create_metadata_widget(scrollable_frame, 'series', 'Series:', 0, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'title', 'Title:', 1, 0, columnspan=3)
-        
-        # Right Column (Publisher/Imprint) - Uses columns 3, 4, 5, 6
-        self._create_metadata_widget(scrollable_frame, 'publisher', 'Publisher:', 0, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'imprint', 'Imprint:', 1, 3, columnspan=4)
-        
-        # Spacer Row 2
-        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=2, column=0, columnspan=7, sticky=(tk.W, tk.E), pady=10)
-        
-        # Left Column (Issue Details)
-        self._create_metadata_widget(scrollable_frame, 'volume', 'Volume:', 3, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'volume_count', 'Total Volumes:', 4, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'number', 'Issue Number:', 5, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'issuecount', 'Issue Count:', 6, 0, columnspan=3)
-        
-        # Right Column (Date)
-        self._create_metadata_widget(scrollable_frame, 'year', 'Year:', 3, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'month', 'Month:', 4, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'day', 'Day:', 5, 3, columnspan=4)
-        
-        # Spacer Row 7
-        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=7, column=0, columnspan=7, sticky=(tk.W, tk.E), pady=10)
-
-        # Bottom Row (Completion/Format Flags)
-        self._create_metadata_widget(scrollable_frame, 'seriescomplete', 'Series Complete:', 8, 0, 'combobox', 
-                                     {'values': ['', 'Yes', 'No'], 'state': 'readonly'}, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'manga', 'Manga Format:', 8, 3, 'combobox', 
-                                     {'values': ['', 'Yes', 'No', 'YesAndRightToLeft'], 'state': 'readonly'}, columnspan=4)
-
-
-    def create_people_tab(self, tab):
-        scrollable_frame = self._create_scrollable_tab(tab)
-        
-        # Left Column (Core Roles) - Columns 0, 1, 2
-        self._create_metadata_widget(scrollable_frame, 'writer', 'Writer(s):', 0, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'penciller', 'Penciller(s):', 1, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'inker', 'Inker(s):', 2, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'colorist', 'Colorist(s):', 3, 0, columnspan=3)
-        
-        # Right Column (Supporting Roles) - Columns 3, 4, 5, 6
-        self._create_metadata_widget(scrollable_frame, 'letterer', 'Letterer(s):', 0, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'coverartist', 'Cover Artist(s):', 1, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'editor', 'Editor(s):', 2, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'authorsort', 'Author Sort Key:', 3, 3, columnspan=4)
-        
-        # Spacer Row 4
-        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=4, column=0, columnspan=7, sticky=(tk.W, tk.E), pady=10)
-
-        # Left Column (Character/Team Info)
-        self._create_metadata_widget(scrollable_frame, 'maincharacter', 'Main Character/Team:', 5, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'characters', 'Other Characters:', 6, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'teams', 'Teams/Groups:', 7, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'locations', 'Locations:', 8, 0, columnspan=3)
-    
-    def create_plot_tab(self, tab):
-        # This tab uses the standard scrollable frame but the widgets span all columns
-        scrollable_frame = self._create_scrollable_tab(tab)
-        
-        def _create_full_span_scrolled_text(parent_frame, key, label_text, row):
-            """Helper for ScrolledText to span all 7 columns."""
-            check_var = tk.BooleanVar(value=False)
-            self.metadata[key] = {'var': check_var} 
-            
-            check_box = ttk.Checkbutton(parent_frame, variable=check_var)
-            check_box.grid(row=row, column=0, sticky=tk.W, padx=(5, 0), pady=4)
-            ToolTip(check_box, f"Tick this box to INCLUDE the value of the '{label_text}' field when writing metadata. If unticked, the original file's value is PRESERVED.")
-
-            label = ttk.Label(parent_frame, text=label_text)
-            label.grid(row=row, column=1, sticky=tk.W, padx=5, pady=4)
-            
-            # The Text widget frame spans all 7 columns (0 to 6)
-            text_frame = ttk.Frame(parent_frame)
-            text_frame.grid(row=row + 1, column=0, columnspan=7, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=4)
-            input_widget = scrolledtext.ScrolledText(text_frame, height=5, wrap=tk.WORD)
-            input_widget.pack(fill=tk.BOTH, expand=True)
-            parent_frame.rowconfigure(row + 1, weight=1) 
-            
-            self.metadata[key]['widget'] = input_widget
-            if key in TOOLTIPS:
-                ToolTip(label, TOOLTIPS[key])
-            
-            return input_widget
-            
-        _create_full_span_scrolled_text(scrollable_frame, 'summary', 'Summary:', 0)
-        _create_full_span_scrolled_text(scrollable_frame, 'notes', 'Notes:', 3)
-        _create_full_span_scrolled_text(scrollable_frame, 'review', 'Review:', 6)
-
-        # Standard Entries (below text boxes, spanning all 7 columns)
-        # We use column 0 and a high columnspan to force it across all 7 columns
-        self._create_metadata_widget(scrollable_frame, 'tags', 'Tags (Comma-Separated):', 9, 0, columnspan=7)
-        self._create_metadata_widget(scrollable_frame, 'scaninformation', 'Scan Information:', 10, 0, columnspan=7)
-
-
-    def create_format_tab(self, tab):
-        scrollable_frame = self._create_scrollable_tab(tab)
-        
-        # Left Column (Format/Identifiers) - Columns 0, 1, 2
-        self._create_metadata_widget(scrollable_frame, 'format', 'Format:', 0, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'gtin', 'GTIN (ISBN/UPC):', 1, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'web', 'Web Link:', 2, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'genre', 'Genre:', 3, 0, columnspan=3) 
-        self._create_metadata_widget(scrollable_frame, 'country', 'Country:', 4, 0, columnspan=3)
-        
-        # Right Column (Ratings/Flags) - Columns 3, 4, 5, 6
-        self._create_metadata_widget(scrollable_frame, 'communityrating', 'Community Rating (0-5):', 0, 3, 'spinbox', 
-                                     {'from_': 0, 'to': 5, 'increment': 0.1}, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'agerating', 'Maturity Rating:', 1, 3, 'combobox', 
-                                     {'values': ['', 'Adults Only', 'Early Childhood', 'Everyone', 'Everyone 10+', 'G', 'Kids', 'M', 'MA15+', 'Mature', 'PG', 'PG-13', 'Teen', 'T+', 'X', 'Young Adult'], 'state': 'readonly'}, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'language', 'Language ISO:', 2, 3, 'combobox', 
-                                     {'values': ['', 'English', 'German', 'Spanish', 'French', 'Japanese', 'Korean', 'Chinese (Simplified)', 'Vietnamese'], 'state': 'editable'}, columnspan=4)
-                                     
-        # Alternate Series / Group
-        self._create_metadata_widget(scrollable_frame, 'storyArc', 'Story Arc Name:', 5, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'seriesgroup', 'Series Group Name:', 6, 0, columnspan=3)
-        self._create_metadata_widget(scrollable_frame, 'alternateSeries', 'Alternate Series:', 5, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'alternatenumber', 'Alternate Issue No.:', 6, 3, columnspan=4)
-        self._create_metadata_widget(scrollable_frame, 'alternateissuecount', 'Alternate Issue Count:', 7, 3, columnspan=4)
-
-        # Spacer Row 8
-        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=8, column=0, columnspan=7, sticky=(tk.W, tk.E), pady=10)
-
-        # Checkboxes (Boolean Flags)
-        self._create_metadata_widget(scrollable_frame, 'blackandwhite', 'Black & White:', 9, 0, widget_type='entry', columnspan=3) 
-        self._create_metadata_widget(scrollable_frame, 'read', 'Read Status:', 9, 3, widget_type='entry', columnspan=4) 
-
-    # --- New Helper Methods for File Handling ---
-    
-    def _get_file_attributes(self, file_path: str) -> Dict:
-        """Calculates and formats file attributes for Treeview."""
-        try:
-            mod_time_timestamp = os.path.getmtime(file_path)
-            mod_time_str = datetime.datetime.fromtimestamp(mod_time_timestamp).strftime('%Y-%m-%d %H:%M')
-        except:
-            mod_time_str = 'N/A'
-        
-        # Check if the script modified it in this session
-        script_changed_status = "Yes" if self.file_script_status.get(file_path, False) else "-"
-        
-        return {
-            'filename': os.path.basename(file_path),
-            'last_changed': mod_time_str,
-            'script_changed': script_changed_status
-        }
-    
-    def _add_file_to_treeview(self, file_path: str):
-        """Adds a new file to the internal list and Treeview."""
-        if file_path not in self.files:
-            self.files.append(file_path)
-            
-            attrs = self._get_file_attributes(file_path)
-            
-            tags = ('modified',) if self.file_script_status.get(file_path, False) else ()
-            
-            # Ensure file_listbox is initialized
-            if self.file_listbox:
-                self.file_listbox.insert(
-                    '', 
-                    tk.END, 
-                    iid=file_path, 
-                    text=attrs['filename'], 
-                    values=(attrs['last_changed'], attrs['script_changed']),
-                    tags=tags
-                )
-
-    def _update_treeview_item(self, file_path: str, new_file_path: Optional[str] = None):
-        """Updates the Treeview item (e.g., after modification or CBR->CBZ conversion)."""
-        
-        current_iid = file_path
-        new_iid = new_file_path if new_file_path else current_iid
-        
-        if not self.file_listbox: return
-
-        # 1. Update internal state if path changed (CBR -> CBZ)
-        if new_iid != current_iid:
-            if current_iid in self.files:
-                self.files.remove(current_iid)
-            if new_iid not in self.files:
-                self.files.append(new_iid)
-            
-            if current_iid in self.file_script_status:
-                self.file_script_status[new_iid] = self.file_script_status.pop(current_iid)
-                
-            # Remove old item and insert new one to update IID
-            if self.file_listbox.exists(current_iid):
-                self.file_listbox.delete(current_iid)
-            current_iid = new_iid
-        
-        # 2. Update status and display attributes
-        if current_iid not in self.file_listbox.get_children():
-            self.file_listbox.insert('', tk.END, iid=current_iid)
-            
-        self.file_script_status[current_iid] = True 
-        attrs = self._get_file_attributes(current_iid)
-        
-        self.file_listbox.item(
-            current_iid, 
-            text=attrs['filename'], 
-            values=(attrs['last_changed'], attrs.get('script_changed')),
-            tags=('modified',)
-        )
-    
-    def get_selected_files_paths(self) -> List[str]:
-        """Returns the full paths of all selected items in the Treeview."""
-        if self.file_listbox:
-            return list(self.file_listbox.selection())
-        return []
-    
-    # --- UI Action Methods ---
-
-    def clear_all_fields(self):
-        result = messagebox.askyesno(
-            "Confirm Clear",
-            "Are you sure you want to clear the content of ALL metadata fields in the GUI?"
-        )
-        if not result:
-            if WINSOUND_AVAILABLE:
-                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS) 
-            return
-
-        for key, items in self.metadata.items():
-            widget = items.get('widget')
-            
-            items['var'].set(False)
-            
-            if isinstance(widget, scrolledtext.ScrolledText):
-                widget.config(state=tk.NORMAL)
-                widget.delete("1.0", tk.END)
-            elif isinstance(widget, ttk.Combobox):
-                widget.set('')
-            elif widget and hasattr(widget, 'delete'):
-                widget.delete(0, tk.END)
-                if hasattr(widget, 'insert'):
-                     widget.insert(0, '') 
-        
-        if WINSOUND_AVAILABLE:
-            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS) 
-
-        messagebox.showinfo("Fields Cleared", "All metadata fields have been cleared.")
-
-
-    def delete_metadata_from_selected_files(self):
-        selected_paths = self.get_selected_files_paths()
-        if not selected_paths:
-            messagebox.showwarning("No Files Selected", "Please select one or more files to delete metadata from.")
-            return
-
-        num_files = len(selected_paths)
-        
-        result1 = messagebox.askyesno(
-            "!!! First Warning !!!",
-            f"Are you ABSOLUTELY sure you want to DELETE the ComicInfo.xml metadata from {num_files} selected file(s)?\n\n"
-            "This action PERMANENTLY removes the metadata and CANNOT be undone.",
-            icon='warning'
-        )
-        if not result1:
-            if WINSOUND_AVAILABLE: winsound.PlaySound("SystemExit", winsound.SND_ALIAS)
-            return
-
-        if WINSOUND_AVAILABLE:
-            winsound.PlaySound("SystemCritical", winsound.SND_ALIAS) 
-        result2 = messagebox.askyesno(
-            "!!! CRITICAL FINAL WARNING !!!",
-            f"CONFIRM DELETION: The ComicInfo.xml file will be PERMANENTLY REMOVED from {num_files} file(s).\n\n"
-            "Click 'Yes' to proceed with irreversible deletion.",
-            icon='error'
-        )
-
-        if not result2: return
-        
-        # UI Freeze and Progress Setup
-        if self.btn_apply and self.file_listbox and self.progress_bar:
-            self.btn_apply.config(state=tk.DISABLED)
-            self.file_listbox.config(selectmode='none') 
-            self.progress_bar['maximum'] = num_files
-            self.progress_bar['value'] = 0
-            self.root.update_idletasks()
-        
-        success_count = 0
-        error_count = 0
-        errors = []
-        
-        for i, file_path in enumerate(selected_paths):
-            try:
-                editor = ComicMetadataEditor(file_path)
-                new_path_str = editor.delete_metadata()
-                
-                if new_path_str:
-                    success_count += 1
-                    self._update_treeview_item(file_path, new_path_str)
-                else:
-                    error_count += 1
-                    errors.append(f"{os.path.basename(file_path)}: Deletion failed")
-            except Exception as e:
-                error_count += 1
-                errors.append(f"{os.path.basename(file_path)}: {str(e)}")
-            
-            if self.progress_bar:
-                self.progress_bar['value'] = i + 1
-                self.root.update_idletasks()
-            
-        # UI Re-enable
-        if self.file_listbox and self.btn_apply and self.progress_bar:
-            self.file_listbox.config(selectmode='extended')
-            self.btn_apply.config(state=tk.NORMAL)
-            self.progress_bar['value'] = 0
-        
-        # Show results
-        msg = f"Successfully deleted metadata from: {success_count}\nFailed: {error_count}"
-        if errors:
-            msg += "\n\nErrors:\n" + "\n".join(errors[:5])
-            if len(errors) > 5:
-                msg += f"\n... and {len(errors) - 5} more"
-        
-        if error_count == 0:
-            messagebox.showinfo("Deletion Complete", msg)
-        else:
-            messagebox.showwarning("Deletion Completed with Errors", msg)
-        
-        self.update_status()
-
-    # --- File Selection Methods ---
-
-    def select_files(self):
-        files = filedialog.askopenfilenames(
-            title="Select Comic Files",
-            filetypes=[("Comic Files", "*.cbz *.cbr"), ("All Files", "*.*")]
-        )
-        for file in files:
-            self._add_file_to_treeview(file)
-        self.update_status()
-    
-    def select_folder(self):
-        folder = filedialog.askdirectory(title="Select Folder")
-        if folder:
-            file_glob = "*.cb[zr]" if RARFILE_AVAILABLE else "*.cbz"
-            if not RARFILE_AVAILABLE:
-                messagebox.showinfo("CBR Support Disabled",
-                                    "rarfile library not found. Only scanning for .cbz files.")
-                                    
-            for file in Path(folder).glob(file_glob):
-                self._add_file_to_treeview(str(file))
-        self.update_status()
-    
-    def select_all(self):
-        if self.file_listbox:
-            self.file_listbox.selection_set(self.file_listbox.get_children())
-        self.update_status()
-    
-    def deselect_all(self):
-        if self.file_listbox:
-            self.file_listbox.selection_remove(self.file_listbox.selection())
-        self.update_status()
-    
-    def remove_selected(self):
-        if self.file_listbox:
-            selected = self.file_listbox.selection()
-            for iid in selected:
-                self.file_listbox.delete(iid)
-                if iid in self.files:
-                    self.files.remove(iid)
-                if iid in self.file_script_status:
-                    del self.file_script_status[iid]
-        self.update_status()
-    
-    def update_status(self, event=None):
-        total = len(self.files)
-        selected = len(self.file_listbox.selection()) if self.file_listbox else 0
-        if self.status_label:
-            self.status_label.config(text=f"{total} files loaded, {selected} selected")
-    
-    # --- Apply Metadata Method ---
-
-    def apply_metadata(self):
-        selected_paths = self.get_selected_files_paths()
-        
-        if not selected_paths:
-            messagebox.showwarning("No Files Selected", 
-                                 "Please select one or more files to apply metadata to.")
-            return
-        
-        metadata_values_to_write = self.get_metadata_values()
-        
-        if not metadata_values_to_write:
-            messagebox.showwarning("Nothing to Do",
-                                 "You didn't tick any checkboxes.\n"
-                                 "Tick the box next to a field to include it in the write.")
-            return
-
-        result = messagebox.askyesno(
-            "Confirm Bulk Write",
-            f"Apply metadata to {len(selected_paths)} file(s)?\n\n"
-            f"The following {len(metadata_values_to_write)} fields will be merged/overwritten:\n"
-            f"- {', '.join(metadata_values_to_write.keys())}\n\n"
-            "Fields with **unticked** boxes will be preserved from the original file."
-        )
-        
-        if not result:
-            return
-        
-        # UI Freeze and Progress Setup
-        if self.btn_apply and self.file_listbox and self.progress_bar:
-            self.btn_apply.config(state=tk.DISABLED)
-            self.file_listbox.config(selectmode='none')
-            self.progress_bar['maximum'] = len(selected_paths)
-            self.progress_bar['value'] = 0
-            self.root.update_idletasks()
-        
-        success_count = 0
-        error_count = 0
-        errors = []
-        
-        for i, file_path in enumerate(selected_paths):
-            try:
-                editor = ComicMetadataEditor(file_path)
-                new_path_str = editor.write_metadata(metadata_values_to_write) 
-                
-                if new_path_str:
-                    success_count += 1
-                    self._update_treeview_item(file_path, new_path_str)
-                else:
-                    error_count += 1
-                    errors.append(f"{os.path.basename(file_path)}: Write failed")
-            except Exception as e:
-                error_count += 1
-                errors.append(f"{os.path.basename(file_path)}: {str(e)}")
-            
-            if self.progress_bar:
-                self.progress_bar['value'] = i + 1
-                self.root.update_idletasks()
-            
-        # UI Re-enable
-        if self.file_listbox and self.btn_apply and self.progress_bar:
-            self.file_listbox.config(selectmode='extended')
-            self.file_listbox.selection_set(self.file_listbox.get_children()) 
-            self.btn_apply.config(state=tk.NORMAL)
-            self.progress_bar['value'] = 0
-        
-        # Show results
-        msg = f"Successfully updated: {success_count}\nFailed: {error_count}"
-        if errors:
-            msg += "\n\nErrors:\n" + "\n".join(errors[:5])
-            if len(errors) > 5:
-                msg += f"\n... and {len(errors) - 5} more"
-        
-        if error_count == 0:
-            messagebox.showinfo("Success", msg)
-        else:
-            messagebox.showwarning("Completed with Errors", msg)
-        
-        self.update_status()
-
-    # --- Other Helper Methods ---
-    
-    def get_metadata_values(self) -> Dict:
+    def _create_metadata_widget(self, parent, internal_key, label_text, row, col, widget_type='entry', widget_opts=None, tooltip_text=""):
         """
-        Extract metadata values from UI, ONLY for fields
-        where the control checkbox is ticked.
+        Creates a Checkbutton (Apply), Label, and Input Widget (Value).
+        col should be 0 or 4 for the left/right groups.
         """
-        values = {}
-        for key, items in self.metadata.items():
-            widget = items.get('widget')
-            check_var = items['var']
-            
-            if check_var.get():
-                if key == 'language' and widget:
-                    values[key] = self._map_language_to_iso(widget.get().strip())
-                elif key in ['blackandwhite', 'read']:
-                    values[key] = 'Yes' 
-                elif isinstance(widget, scrolledtext.ScrolledText):
-                    values[key] = widget.get("1.0", tk.END).strip()
-                elif widget:
-                    values[key] = widget.get().strip()
-                    
-        return values
-    
-    def _map_language_to_iso(self, language_name: str) -> str:
-        mapping = {
-            'English': 'en', 'Spanish': 'es', 'French': 'fr', 'German': 'de',
-            'Italian': 'it', 'Japanese': 'ja', 'Korean': 'ko', 
-            'Chinese (Simplified)': 'zh-Hans', 'Vietnamese': 'vi'
-        }
-        return mapping.get(language_name, language_name)
-    
-    def show_startup_explanation(self):
-        """Displays a modal window explaining the new features."""
-        if self._explanation_shown: return
+        
+        # --- 1. Apply Checkbox (controls whether this field is written) ---
+        var_check = tk.IntVar(value=0)
+        self.control_vars[f'check_{internal_key}'] = var_check
+        
+        check_apply = ttk.Checkbutton(parent, variable=var_check)
+        check_apply.grid(row=row, column=col, sticky=tk.W, padx=(5, 0), pady=2)
+        ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved.")
 
+        # --- 2. Label ---
+        label = ttk.Label(parent, text=label_text)
+        label.grid(row=row, column=col + 1, sticky=tk.W, padx=(0, 5), pady=2)
+        
+        # --- 3. Input Widget (Value) ---
+        widget = None
+        
+        # Use a larger default width for better horizontal stretching
+        WIDER_WIDTH = 60 
+
+        if widget_type == 'checkbutton':
+            # For boolean metadata: the value is a tk.IntVar (0 or 1)
+            var_value = tk.IntVar()
+            self.control_vars[internal_key] = var_value
+            
+            # Place the checkbutton in the value column (col + 2)
+            widget = ttk.Checkbutton(parent, text="", variable=var_value) 
+            widget.grid(row=row, column=col + 2, sticky=tk.W, padx=(0, 5), pady=2)
+            
+        elif widget_type == 'entry':
+            var_value = tk.StringVar()
+            self.control_vars[internal_key] = var_value
+            widget = ttk.Entry(parent, textvariable=var_value, width=WIDER_WIDTH)
+            widget.grid(row=row, column=col + 2, sticky=tk.W + tk.E, padx=(0, 5), pady=2)
+
+        elif widget_type == 'combobox':
+            var_value = tk.StringVar()
+            self.control_vars[internal_key] = var_value
+            opts = {'state': 'readonly', 'width': WIDER_WIDTH - 2, **(widget_opts or {})}
+            widget = ttk.Combobox(parent, textvariable=var_value, **opts)
+            widget.grid(row=row, column=col + 2, sticky=tk.W + tk.E, padx=(0, 5), pady=2)
+        
+        self.input_widgets[internal_key] = widget
+
+        if tooltip_text and widget:
+            ToolTip(widget, tooltip_text)
+
+        # Ensure the input column (col + 2) expands horizontally to fill space
+        parent.grid_columnconfigure(col + 2, weight=1)
+
+    def _create_long_text_widget(self, parent, internal_key, label_text, row, tooltip_text=""):
+        """Creates the special layout for multi-line text fields (Summary, Notes, Review)."""
+        
+        # --- 1. Apply Checkbox ---
+        var_check = tk.IntVar(value=0)
+        self.control_vars[f'check_{internal_key}'] = var_check
+        
+        check_apply = ttk.Checkbutton(parent, variable=var_check)
+        check_apply.grid(row=row, column=0, sticky=tk.W, padx=(5, 0), pady=2)
+        ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved.")
+
+        # --- 2. Label (Spans two columns for better look) ---
+        label = ttk.Label(parent, text=label_text)
+        label.grid(row=row, column=1, columnspan=2, sticky=tk.W, padx=(0, 5), pady=2)
+
+        # --- 3. ScrolledText Widget (Value) ---
+        var_value = tk.StringVar() 
+        self.control_vars[internal_key] = var_value
+        
+        # Increase default width for better horizontal space usage
+        widget = scrolledtext.ScrolledText(parent, wrap=tk.WORD, width=90, height=5, font=("Arial", 9))
+        var_value.widget_ref = widget 
+        
+        # Widget spans columns 0 through 6 for maximum width
+        widget.grid(row=row + 1, column=0, columnspan=7, sticky=tk.W + tk.E, padx=5, pady=2) 
+        
+        # Update StringVar from widget content
+        widget.bind("<FocusOut>", lambda e, w=widget, v=var_value: v.set(w.get("1.0", tk.END).strip()))
+        widget.bind("<KeyRelease>", lambda e, w=widget, v=var_value: v.set(w.get("1.0", tk.END).strip()))
+        
+        self.input_widgets[internal_key] = widget
+
+        if tooltip_text:
+            ToolTip(widget, tooltip_text)
+
+        # Ensure the frame allows text widgets to expand horizontally
+        parent.grid_columnconfigure(6, weight=1)
+
+    def _create_metadata_tab(self):
+        """Consolidated tab for all metadata, using a dense two-column grid."""
+        scrollable_frame = self._create_metadata_tab_frame("All Metadata")
+        
+        # --- Date Fields Group (Top Left) ---
+        date_fields = [
+            ('year', 'Year:', 'entry', None, "Publication year (YYYY)."),
+            ('month', 'Month:', 'entry', None, "Publication month (1-12)."),
+            ('day', 'Day:', 'entry', None, "Publication day (1-31)."),
+        ]
+
+        # --- Core/Volume/Series Fields (Left Column, below Dates) ---
+        left_fields = [
+            ('title', 'Title:', 'entry', None, "The main title of the comic."),
+            ('series', 'Series:', 'entry', None, "The main series name."),
+            ('volume', 'Volume #:', 'entry', None, "The volume number (e.g., 1 for Volume 1)."),
+            ('volume_count', 'Total Volumes:', 'entry', None, "Total number of volumes in the series."),
+            ('number', 'Issue #:', 'entry', None, "The sequential issue number."),
+            ('issuecount', 'Total Issues:', 'entry', None, "Total number of issues in the story arc/series."),
+            ('seriescomplete', 'Series Complete:', 'checkbutton', None, "Is this series finished? (True/False)"),
+            ('storyArc', 'Story Arc:', 'entry', None, "The name of the overall story arc (e.g., 'The Dark Phoenix Saga')."),
+        ]
+        
+        # --- Auxiliary/Publisher/Rating Fields (Right Column) ---
+        right_fields = [
+            ('publisher', 'Publisher:', 'entry', None, "The comic book publisher."),
+            ('imprint', 'Imprint:', 'entry', None, "The imprint or sub-brand of the publisher."),
+            ('seriesgroup', 'Series Group:', 'entry', None, "A grouping for related series (e.g., 'Marvel Legacy')."),
+            # UPDATED: Format now uses a combobox with a list of COMMON_FORMATS
+            ('format', 'Format:', 'combobox', {'values': self.COMMON_FORMATS, 'state': 'normal'}, "Format type (e.g., Digital, Print, Hardcover)."),
+            ('agerating', 'Maturity Rating:', 'combobox', {'values': self.AGE_RATINGS, 'state': 'readonly'}, "The maturity rating for the content."),
+            # UPDATED: Manga uses the expanded MANGA_TYPES list
+            ('manga', 'Manga:', 'combobox', {'values': self.MANGA_TYPES, 'state': 'readonly'}, "Is this a Manga? Specifies reading direction."),
+            ('blackandwhite', 'Black & White:', 'checkbutton', None, "Is the content in black and white? (True/False)"),
+            ('language', 'Language (ISO):', 'combobox', {'values': self.ISO_LANGUAGES, 'state': 'normal'}, "Language code (e.g., en, fr)."),
+            ('country', 'Country:', 'combobox', {'values': self.COMMON_COUNTRIES, 'state': 'normal'}, "Country of publication (e.g., USA)."),
+            ('genre', 'Genre:', 'entry', None, "The primary genre (e.g., Action, Sci-Fi)."),
+            ('communityrating', 'Community Rating (0-5):', 'entry', None, "A community or personal rating (e.g., 3.5)."),
+            ('gtin', 'GTIN/EAN/ISBN:', 'entry', None, "Product identifier code."),
+            ('read', 'Read Status:', 'checkbutton', None, "Has the comic been read? (For tracking purposes)."),
+            ('alternatenumber', 'Alt. Number:', 'entry', None, "Alternate issue number for variants or reprints."),
+            ('alternateissuecount', 'Alt. Total Issues:', 'entry', None, "Total issues in the alternate series/volume."),
+            ('alternateSeries', 'Alt. Series:', 'entry', None, "Name of an alternate series/volume."),
+        ]
+        
+        # 1. Date fields (Left column, starting at row 0)
+        current_row = 0
+        for i, (internal_key, label, widget_type, widget_opts, tooltip) in enumerate(date_fields):
+            self._create_metadata_widget(scrollable_frame, internal_key, label, current_row + i, 0, widget_type, widget_opts, tooltip)
+        current_row += len(date_fields) # Now at the row right after the date fields
+
+        # 2. Left fields (Left column, continuing from date fields)
+        for i, (internal_key, label, widget_type, widget_opts, tooltip) in enumerate(left_fields):
+            self._create_metadata_widget(scrollable_frame, internal_key, label, current_row + i, 0, widget_type, widget_opts, tooltip)
+        max_left_row = current_row + len(left_fields)
+
+        # 3. Right fields (Right column, starting at row 0)
+        scrollable_frame.grid_columnconfigure(3, minsize=50) # Spacer column
+        for i, (internal_key, label, widget_type, widget_opts, tooltip) in enumerate(right_fields):
+            self._create_metadata_widget(scrollable_frame, internal_key, label, i, 4, widget_type, widget_opts, tooltip)
+        max_right_row = len(right_fields)
+
+
+        # CREW & SIMPLE TEXT (Middle section, single column)
+        simple_text_start_row = max(max_left_row, max_right_row) + 1 
+        
+        ttk.Separator(scrollable_frame, orient=tk.HORIZONTAL).grid(row=simple_text_start_row, column=0, columnspan=7, sticky=tk.EW, pady=(10, 5))
+        simple_text_start_row += 1 
+
+        simple_text_fields = [
+            ('writer', 'Writer:', "The writer(s) of the story."),
+            ('penciller', 'Penciller:', "The artist(s) responsible for the pencils."),
+            ('inker', 'Inker:', "The artist(s) responsible for the inking."),
+            ('colorist', 'Colorist:', "The artist(s) responsible for coloring."),
+            ('letterer', 'Letterer:', "The person(s) responsible for lettering."),
+            ('coverartist', 'Cover Artist:', "The artist(s) who drew the cover."),
+            ('editor', 'Editor:', "The editor(s) responsible for the book."),
+            ('authorsort', 'Author Sort:', "Field used for sorting by author/creator."),
+            ('maincharacter', 'Main Character:', "The central character or team."),
+            ('characters', 'Characters (Comma separated):', "All major characters in the comic."),
+            ('teams', 'Teams (Comma separated):', "All teams featured in the comic."),
+            ('locations', 'Locations (Comma separated):', "Key locations where the story takes place."),
+            ('tags', 'Tags (Comma separated):', "Additional keywords or tags."),
+            ('scaninformation', 'Scan Info:', "Details about the digital scan/source."),
+            ('web', 'Web/URL:', "URL of the comic or source.")
+        ]
+        
+        # Use columns 0-2 (left group) for crew/text fields
+        for i, (internal_key, label, tooltip) in enumerate(simple_text_fields):
+            self._create_metadata_widget(scrollable_frame, internal_key, label, simple_text_start_row + i, 0, 'entry', None, tooltip)
+
+
+        # MULTILINE FIELDS (Bottom section, full width)
+        # Start where simple text left off, plus a row for visual break
+        text_start_row = simple_text_start_row + len(simple_text_fields) + 1
+        
+        ttk.Separator(scrollable_frame, orient=tk.HORIZONTAL).grid(row=text_start_row, column=0, columnspan=7, sticky=tk.EW, pady=(10, 5))
+        text_start_row += 1 
+
+        long_text_fields = [
+            ('summary', 'Summary:', "A brief description of the comic's plot."),
+            ('notes', 'Notes:', "General notes about the file or comic."),
+            ('review', 'Review:', "A personal review or rating for the comic."),
+        ]
+        
+        current_row = text_start_row
+        for internal_key, label, tooltip in long_text_fields:
+            # This creates the label at current_row and the ScrolledText widget at current_row + 1
+            self._create_long_text_widget(scrollable_frame, internal_key, label, current_row, tooltip)
+            current_row += 2 # Long text takes up the label row + text widget row
+            
+    def show_welcome_message(self):
+        """Displays a welcome and explanation window."""
         top = tk.Toplevel(self.root)
-        top.title("Welcome to v2.10: Stronger Layout Separation")
-        top.geometry("600x450")
+        top.title("Welcome to the Comic Metadata Bulk Editor")
         top.resizable(False, False)
-        top.grab_set() 
+        top.transient(self.root)
+        top.grab_set()
 
-        frame = ttk.Frame(top, padding="10")
+        frame = ttk.Frame(top, padding="15")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="New in v2.10: Enhanced Field Separation", font=('Arial', 14, 'bold')).pack(pady=10)
-
-        st = scrolledtext.ScrolledText(frame, height=15, wrap=tk.WORD, font=('Arial', 10), relief=tk.FLAT)
+        ttk.Label(frame, text="Comic Metadata Bulk Editor (v2.27)", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        st = scrolledtext.ScrolledText(frame, width=60, height=15, font=("Arial", 10), relief=tk.FLAT)
         st.pack(pady=10, fill=tk.BOTH, expand=True)
         
         explanation = """
-This version significantly increases the **visual separation** between the left and right field groups in the metadata tabs.
+This version continues the cleanup and standardization of the metadata fields.
 
-### Enhanced Separation Details
-1.  **Separator Size:** The empty spacer column between the two field groups is now **100 pixels wide** (previously 50).
-2.  **Right-Side Padding:** The elements in the right field group now have extra horizontal padding to ensure they start further away from the separator.
+### NEW in v2.27: Standardized Fields 📖
+* **Format:** The **Format** field now uses a dedicated dropdown menu containing all common ComicRack/ComicInfo values (e.g., 'Digital', 'Hardcover', 'Trade Paperback', etc.).
+* **Manga:** The **Manga** dropdown now includes the required `YesAndRightToLeft` option for specific reading directions.
 
-This guarantees a clearly visible, fixed gap between the two columns, even when the main window is maximized.
+### Key Features Maintained
+* **Merge Logic (v2.26):** Unchecked fields are **preserved** in the file. Only **checked** fields are updated.
+* **Date Grouping (v2.26):** Year, Month, Day fields are grouped together for better input flow.
+* **Tickbox Control (v2.0):** Only fields with a **TICKED APPLY CHECKBOX** will be included in the update.
+
+### How it Works
+1.  **Load Files:** Use "Add Files..." to load your comics (.cbz or .cbr).
+2.  **Fill & Tick:** Enter metadata and **TICK** the checkboxes next to the fields you want to update.
+3.  **Apply:** Select the files and click "APPLY METADATA to Selected".
         """
         
         st.insert("1.0", explanation)
@@ -1119,7 +860,6 @@ This guarantees a clearly visible, fixed gap between the two columns, even when 
         self.root.update_idletasks() 
         top.update_idletasks() 
         
-        # Center the window
         root_x = self.root.winfo_x()
         root_y = self.root.winfo_y()
         root_w = self.root.winfo_width()
@@ -1129,17 +869,339 @@ This guarantees a clearly visible, fixed gap between the two columns, even when 
         y = root_y + 50 
 
         top.wm_geometry(f"+{x}+{y}")
-        self._explanation_shown = True 
+
+    def update_status(self, message: Optional[str] = None):
+        """Updates the status bar message and checks file list integrity."""
+        
+        if not self.files:
+            msg = "Ready. Load files to begin."
+            self.btn_apply.config(state=tk.DISABLED)
+        else:
+            selected_count = len(self.file_listbox.curselection())
+            msg = f"Files Loaded: {len(self.files)} | Selected: {selected_count}"
+            self.btn_apply.config(state=tk.NORMAL if selected_count > 0 else tk.DISABLED)
+
+        self.status_bar.config(text=message or msg)
+
+    def add_files(self):
+        """Opens file dialog to select CBZ/CBR files."""
+        file_types = [
+            ("Comic Archives", "*.cbz *.cbr"),
+            ("CBZ files", "*.cbz"),
+            ("CBR files", "*.cbr"),
+            ("All files", "*.*")
+        ]
+        
+        new_files = filedialog.askopenfilenames(
+            title="Select Comic Files (.cbz / .cbr)",
+            filetypes=file_types
+        )
+        
+        if new_files:
+            for f in new_files:
+                if f not in self.files:
+                    self.files.append(f)
+                    self.file_listbox.insert(tk.END, os.path.basename(f))
+            self.update_status()
+
+    def remove_selected(self):
+        """Removes selected files from the list."""
+        selected_indices = self.file_listbox.curselection()
+        if not selected_indices:
+            return
+
+        for index in selected_indices[::-1]:
+            del self.files[index]
+            self.file_listbox.delete(index)
+            
+        self.update_status()
+        self.clear_fields()
+
+    def clear_fields(self):
+        """Clears all input fields and unticks all checkboxes."""
+        for key in self.METADATA_FIELDS:
+            # Clear value variable (StringVar or IntVar)
+            if key in self.control_vars:
+                var = self.control_vars[key]
+                if isinstance(var, tk.StringVar):
+                    # Handle Text widget specially
+                    if hasattr(var, 'widget_ref'):
+                        var.widget_ref.delete("1.0", tk.END)
+                    var.set("")
+                elif isinstance(var, tk.IntVar):
+                    var.set(0) # Clear boolean checkbox
+
+            # Clear 'apply' checkbox
+            check_key = f'check_{key}'
+            if check_key in self.control_vars:
+                self.control_vars[check_key].set(0)
+
+        self.update_status("Fields cleared. Ready for new input.")
+
+    def get_metadata_values(self) -> Dict[str, str]:
+        """Retrieves current values from all input fields, casting to appropriate string format for ComicInfo.xml.
+           ONLY returns fields that are ticked/checked."""
+        metadata = {}
+        for key in self.METADATA_FIELDS:
+            # Only process if the 'apply' checkbox is ticked
+            check = self.control_vars.get(f'check_{key}')
+            if not check or check.get() != 1:
+                continue
+
+            var = self.control_vars.get(key)
+            if not var:
+                continue
+
+            value = None
+            
+            if isinstance(var, tk.StringVar):
+                # Handle StringVar (Entry, Combobox, Text)
+                if hasattr(var, 'widget_ref'):
+                    # Retrieve the content directly from the ScrolledText widget
+                    value = var.widget_ref.get("1.0", tk.END).strip()
+                else:
+                    value = var.get().strip()
+                
+                # Special casing for LanguageISO: extract the code (e.g., 'en')
+                if key == 'language':
+                    # Extract ISO part from 'en (English)' format
+                    match = re.match(r'([a-z]{2,3})\s+\(.+\)', value, re.IGNORECASE)
+                    if match:
+                        value = match.group(1).lower()
+
+            elif isinstance(var, tk.IntVar):
+                # Handle IntVar (Checkbutton)
+                raw_value = var.get()
+                
+                # Convert the internal 0/1 to the standard ComicInfo.xml string ('Yes'/'No' or 'True'/'False')
+                if key in ['seriescomplete', 'blackandwhite', 'read']: 
+                    value = 'Yes' if raw_value == 1 else 'No'
+                elif key == 'isfolder':
+                    # This field is usually handled internally, but included for completeness
+                    value = 'true' if raw_value == 1 else 'false'
+                
+            if value is not None and value != '':
+                metadata[key] = value
+        return metadata
+        
+    def load_metadata(self):
+        """Loads metadata from the currently selected file and displays it in a viewer window."""
+        selected_indices = self.file_listbox.curselection()
+        
+        if len(selected_indices) != 1:
+            messagebox.showwarning("Selection Error", "Please select exactly ONE file to view its metadata.")
+            return
+
+        selected_index = selected_indices[0]
+        file_path = self.files[selected_index]
+        
+        try:
+            editor = ComicMetadataEditor(file_path)
+            metadata = editor.read_metadata()
+            
+            if not metadata:
+                messagebox.showwarning(
+                    "No Metadata Found",
+                    f"The file '{os.path.basename(file_path)}' does not contain readable ComicInfo.xml metadata (or it's empty)."
+                )
+                return 
+            
+            MetadataViewer(self.root, metadata, file_path)
+            
+        except Exception as e:
+            messagebox.showerror("Error Reading File", f"Could not read metadata from file: {e}")
+
+    def copy_all_to_main_fields(self):
+        """Copies metadata from the selected file into the main input fields."""
+        selected_indices = self.file_listbox.curselection()
+        
+        if len(selected_indices) != 1:
+            messagebox.showwarning("Selection Error", "Please select exactly ONE file to import metadata from.")
+            return
+
+        selected_index = selected_indices[0]
+        file_path = self.files[selected_index]
+        self.update_status(f"Importing metadata from: {os.path.basename(file_path)}...")
+
+        try:
+            editor = ComicMetadataEditor(file_path)
+            metadata = editor.read_metadata()
+            
+            if not metadata:
+                 messagebox.showwarning(
+                    "No Metadata Found",
+                    f"The file '{os.path.basename(file_path)}' does not contain readable ComicInfo.xml metadata (or it's empty)."
+                )
+                 return
+
+            self.clear_fields()
+            
+            updated_count = 0
+            for key, value in metadata.items():
+                if key in self.control_vars:
+                    var = self.control_vars[key]
+                    
+                    if isinstance(var, tk.StringVar):
+                        # Handle Text widget
+                        if hasattr(var, 'widget_ref'):
+                            var.widget_ref.delete("1.0", tk.END)
+                            var.widget_ref.insert("1.0", value)
+                            var.set(value)
+                        else:
+                            # For Language, try to match ISO code ('en') to the full Combobox string ('en (English)')
+                            if key == 'language':
+                                iso_code = value.lower()
+                                matched_val = next((s for s in self.ISO_LANGUAGES if s.startswith(iso_code + ' ')), value)
+                                var.set(matched_val)
+                            else:
+                                var.set(value)
+                                
+                    elif isinstance(var, tk.IntVar):
+                        # Handle Boolean values: 'Yes', 'No', 'True', 'False', 0, 1
+                        val_str = str(value).lower()
+                        if val_str in ['yes', 'true', '1']:
+                            var.set(1)
+                        else:
+                            var.set(0)
+                            
+                    # Set the corresponding 'apply' checkbox to Ticked (1)
+                    check_key = f'check_{key}'
+                    if check_key in self.control_vars:
+                        self.control_vars[check_key].set(1)
+                        updated_count += 1
+                        
+            self.update_status(f"Successfully imported {updated_count} fields and ticked checkboxes.")
+
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import metadata: {e}")
+            self.update_status("Error during metadata import.")
+
+    def apply_metadata(self):
+        """Applies the current metadata values to all selected files."""
+        selected_indices = self.file_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("No Selection", "Please select one or more files to apply metadata.")
+            return
+
+        # Get the fields that the user WANTS to update (i.e., the checked fields)
+        gui_metadata_updates = self.get_metadata_values()
+        
+        # Check if the user has selected any field to apply
+        if not any(self.control_vars.get(f'check_{k}', tk.IntVar()).get() == 1 for k in self.METADATA_FIELDS):
+            messagebox.showwarning("No Fields Selected", "No metadata fields are ticked. Nothing will be updated.")
+            return
+
+        result = messagebox.askyesno(
+            "Confirm",
+            f"Apply metadata to {len(selected_indices)} file(s)?\n\n"
+            "Only **TICKED** fields will be updated/merged. Unticked fields will be **PRESERVED**."
+        )
+        
+        if not result:
+            return
+        
+        self.file_listbox.config(state=tk.DISABLED)
+        self.btn_apply.config(state=tk.DISABLED)
+        self.progress_bar.config(mode='determinate', maximum=len(selected_indices))
+        self.progress_bar.pack(fill=tk.X, pady=(0, 5))
+        
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        for i, idx in enumerate(selected_indices):
+            file_path = self.files[idx]
+            self.update_status(f"Processing file {i+1}/{len(selected_indices)}: {os.path.basename(file_path)}")
+            self.root.update_idletasks()
+            
+            try:
+                editor = ComicMetadataEditor(file_path)
+                
+                # 1. Read existing metadata (for preservation)
+                existing_metadata = editor.read_metadata()
+                
+                # 2. Merge: Start with existing data, then overwrite/add only the new, checked values
+                merged_metadata = existing_metadata.copy()
+                merged_metadata.update(gui_metadata_updates)
+
+                # 3. Write the merged result
+                new_path_str = editor.write_metadata(merged_metadata)
+                
+                if new_path_str:
+                    success_count += 1
+                    if new_path_str != file_path:
+                        # File type changed (CBR -> CBZ), update the list
+                        self.files[idx] = new_path_str
+                        self.file_listbox.delete(idx)
+                        self.file_listbox.insert(idx, os.path.basename(new_path_str))
+                else:
+                    error_count += 1
+                    errors.append(f"{os.path.basename(file_path)}: Write failed")
+            except Exception as e:
+                error_count += 1
+                errors.append(f"{os.path.basename(file_path)}: {str(e)}")
+            
+            self.progress_bar['value'] = i + 1
+            self.root.update_idletasks()
+        
+        self.file_listbox.config(state=tk.NORMAL)
+        for idx in selected_indices:
+            # Re-select the processed items
+            self.file_listbox.select_set(idx) 
+        
+        self.btn_apply.config(state=tk.NORMAL)
+        self.progress_bar.pack_forget() 
+        self.progress_bar['value'] = 0
+        
+        msg = f"Successfully updated: {success_count}\nFailed: {error_count}"
+        if errors:
+            msg += "\n\nErrors:\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                msg += f"\n... and {len(errors) - 5} more"
+        
+        if error_count == 0:
+            if WINSOUND_AVAILABLE: winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            messagebox.showinfo("Success", msg)
+        else:
+            if WINSOUND_AVAILABLE: winsound.MessageBeep(winsound.MB_ICONWARNING)
+            messagebox.showwarning("Completed with Errors", msg)
+        
+        self.update_status()
+
+    def on_file_select(self, event):
+        """Handle selection changes in the file listbox."""
+        selected_indices = self.file_listbox.curselection()
+        
+        # Locate the button frame where "Copy All to Main Fields" resides
+        parent_frame = self.file_listbox.master.master 
+        # Assuming button_frame is the second child of the file list's parent frame
+        button_frame = parent_frame.winfo_children()[1] 
+        
+        copy_all_btn = next((w for w in button_frame.winfo_children() if w.cget("text") == "Copy All to Main Fields"), None)
+        
+        if copy_all_btn:
+            copy_all_btn.config(state=tk.NORMAL if len(selected_indices) == 1 else tk.DISABLED)
+            
+        self.update_status()
 
 
 def main():
+    """Main function to start the GUI application."""
     root = tk.Tk()
-    style = ttk.Style()
-    style.configure('TFrame', padding=5)
-    
     app = ComicMetadataGUI(root)
+    
+    # Add an extra button to the left pane for Copy All
+    # Find the button frame (it is the second child of the left pane's main frame)
+    parent_frame = app.file_listbox.master.master 
+    button_frame = parent_frame.winfo_children()[1] 
+    
+    # Add a dedicated button for copying all metadata
+    copy_btn = ttk.Button(button_frame, text="Copy All to Main Fields", command=app.copy_all_to_main_fields, state=tk.DISABLED)
+    # This button is placed in the third row, spanning two columns
+    copy_btn.grid(row=2, column=0, columnspan=2, sticky=tk.W+tk.E, padx=2, pady=2)
+    
     root.mainloop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
