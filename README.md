@@ -68,7 +68,7 @@ This editor writes metadata inside each archive as a `ComicInfo.xml` file. Diffe
 
 KOReader does **not** read the internal `ComicInfo.xml` by default. To enable metadata support:
 
-  * Install the **comicmeta.koplugin** on your KOReader device. ([Repository](https://github.com/dickloraine/EmbedComicMetadata.git))
+  * Install the **comicmeta.koplugin** on your KOReader device. ([Repository](https://github.com/KORComic/comicmeta.koplugin.git))
 
 This plugin allows KOReader to read ComicRack metadata stored inside `.cbz` and `.cbr` files. Without it, KOReader ignores metadata embedded in the archive.
 
