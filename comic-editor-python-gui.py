@@ -3,11 +3,11 @@
 Comic Metadata Bulk Editor - Python GUI Version
 A tool to edit ComicInfo.xml metadata in CBZ/CBR files
 
-Version 2.27: Formats & Manga Options
-- ENHANCEMENT: Added full list of ComicRack/ComicInfo 2.1 standard values for the 'Format' field.
-- ENHANCEMENT: Added 'YesAndRightToLeft' to the 'Manga' field options.
-- FIX: Ensured the 'Format' field uses a combobox for selection, not a free entry field.
-- Maintained: Robust merge logic and Date grouping from v2.26.
+Version 2.31: Autovoluming Re-added
+- FIX: Re-integrated the "Autovoluming" and "Manual Sorting" features 
+  that were accidentally removed in the v2.30 layout update.
+- Maintained: "View Metadata" button and clear 3-column button layout.
+- Maintained: Robust merge logic and all ComicRack standard options.
 """
 
 import os
@@ -465,11 +465,16 @@ class ComicMetadataGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Comic Metadata Bulk Editor - v2.27 (Formats & Manga Options)")
+        self.root.title("Comic Metadata Bulk Editor - v2.31 (Autovoluming Re-added)")
         
         self.files: List[str] = []
         self.control_vars: Dict[str, tk.Variable] = {}
         self.input_widgets: Dict[str, tk.Widget] = {} 
+        self.autonumber_start_var = tk.StringVar(value='1')
+        
+        # New member variables for the new buttons
+        self.copy_all_btn: Optional[ttk.Button] = None
+        self.view_metadata_btn: Optional[ttk.Button] = None
         
         self._setup_styles()
         self._setup_main_layout()
@@ -511,6 +516,7 @@ class ComicMetadataGUI:
     def _create_left_pane(self, parent):
         """Build the file list, controls, and status bar."""
         
+        # --- 1. File List Frame ---
         list_frame = ttk.Frame(parent)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
         
@@ -532,18 +538,58 @@ class ComicMetadataGUI:
         
         self.file_listbox.bind('<<ListboxSelect>>', self.on_file_select)
         
-        button_frame = ttk.Frame(parent)
-        button_frame.pack(fill=tk.X, pady=5)
-        
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
+        # --- 2. Action Buttons Frame (Add/Remove/View) ---
+        action_frame = ttk.Frame(parent)
+        action_frame.pack(fill=tk.X, pady=(5, 0))
+        # Use 3 columns for a clean layout
+        action_frame.columnconfigure(0, weight=1)
+        action_frame.columnconfigure(1, weight=1)
+        action_frame.columnconfigure(2, weight=1) 
 
-        ttk.Button(button_frame, text="Add Files...", command=self.add_files).grid(row=0, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
-        ttk.Button(button_frame, text="Remove Selected", command=self.remove_selected).grid(row=0, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
-        ttk.Button(button_frame, text="View Metadata", command=self.load_metadata).grid(row=1, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
+        ttk.Button(action_frame, text="Add Files...", command=self.add_files).grid(row=0, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
+        ttk.Button(action_frame, text="Remove Selected", command=self.remove_selected).grid(row=0, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
         
-        self.btn_apply = ttk.Button(button_frame, text="APPLY METADATA to Selected", command=self.apply_metadata, style='Accent.TButton')
-        self.btn_apply.grid(row=1, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
+        # NEW BUTTON: View Metadata
+        self.view_metadata_btn = ttk.Button(action_frame, text="👁️ View Metadata", command=self.load_metadata, state=tk.DISABLED)
+        self.view_metadata_btn.grid(row=0, column=2, sticky=tk.W+tk.E, padx=2, pady=2)
+        ToolTip(self.view_metadata_btn, "Loads and displays the ComicInfo.xml metadata from the **single** selected file in a new window.")
+
+        # "Copy All" button renamed and moved to row 1, spanning all 3 columns
+        self.copy_all_btn = ttk.Button(action_frame, text="Import Metadata from Selected", command=self.copy_all_to_main_fields, state=tk.DISABLED)
+        self.copy_all_btn.grid(row=1, column=0, columnspan=3, sticky=tk.W+tk.E, padx=2, pady=2)
+        ToolTip(self.copy_all_btn, "Loads metadata from the **single** selected file and populates the main form fields, ticking their checkboxes.")
+
+
+        # --- 3. Sorting & Autonumbering Frame ---
+        sort_num_frame = ttk.Frame(parent, relief=tk.RIDGE, padding=5)
+        sort_num_frame.pack(fill=tk.X, pady=(5, 5))
+        sort_num_frame.columnconfigure(0, weight=1)
+        sort_num_frame.columnconfigure(1, weight=1)
+        
+        # Sorting Buttons
+        ttk.Label(sort_num_frame, text="Manual Sorting:", font=("Arial", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 2))
+        ttk.Button(sort_num_frame, text="▲ Move Up", command=self.move_selected_up).grid(row=1, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
+        ttk.Button(sort_num_frame, text="▼ Move Down", command=self.move_selected_down).grid(row=1, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
+        
+        ttk.Separator(sort_num_frame, orient=tk.HORIZONTAL).grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=5)
+        
+        # Autonumbering Controls
+        ttk.Label(sort_num_frame, text="Auto-Voluming:", font=("Arial", 9, "bold")).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(0, 2))
+        
+        num_entry_frame = ttk.Frame(sort_num_frame)
+        num_entry_frame.grid(row=4, column=0, sticky=tk.W+tk.E, padx=2, pady=2)
+        num_entry_frame.columnconfigure(1, weight=1)
+        ttk.Label(num_entry_frame, text="Start Num:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(num_entry_frame, textvariable=self.autonumber_start_var, width=5).grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+        ToolTip(num_entry_frame, "The volume number to start counting from (e.g., 1).")
+        
+        ttk.Button(sort_num_frame, text="🔢 Autovolume Selected", command=self.autonumber_selected).grid(row=4, column=1, sticky=tk.W+tk.E, padx=2, pady=2)
+        ToolTip(sort_num_frame.winfo_children()[-1], "Sequentially number the selected files based on their order, starting from the Start Num. Updates the 'Volume #' and 'Total Volumes' fields, and ticks their checkboxes.")
+
+
+        # --- 4. Apply and Status ---
+        self.btn_apply = ttk.Button(parent, text="APPLY METADATA to Selected", command=self.apply_metadata, style='Accent.TButton')
+        self.btn_apply.pack(fill=tk.X, pady=5)
         
         self.status_bar = ttk.Label(parent, text="Ready. Load files to begin.", relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(fill=tk.X, ipady=2, pady=(5, 0))
@@ -829,27 +875,28 @@ class ComicMetadataGUI:
         frame = ttk.Frame(top, padding="15")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="Comic Metadata Bulk Editor (v2.27)", font=("Arial", 14, "bold")).pack(pady=10)
+        ttk.Label(frame, text="Comic Metadata Bulk Editor (v2.31)", font=("Arial", 14, "bold")).pack(pady=10)
         
         st = scrolledtext.ScrolledText(frame, width=60, height=15, font=("Arial", 10), relief=tk.FLAT)
         st.pack(pady=10, fill=tk.BOTH, expand=True)
         
         explanation = """
-This version continues the cleanup and standardization of the metadata fields.
+This version re-integrates the **Autovoluming** and **Manual Sorting** tools alongside the **View Metadata** button.
 
-### NEW in v2.27: Standardized Fields 📖
-* **Format:** The **Format** field now uses a dedicated dropdown menu containing all common ComicRack/ComicInfo values (e.g., 'Digital', 'Hardcover', 'Trade Paperback', etc.).
-* **Manga:** The **Manga** dropdown now includes the required `YesAndRightToLeft` option for specific reading directions.
+### 1. Auto-Voluming & Manual Sorting 📚
+* **Manual Sort:** Use the **'▲ Move Up'** and **'▼ Move Down'** buttons to precisely order the files in the listbox.
+* **Auto-Voluming:** Select the files, set the **'Start Num'** (e.g., 1), and click **'Autovolume Selected'**.
+    * This will set the `Volume #` (Volume) field to the sequence (1, 2, 3...) based on the file order.
+    * It will also calculate and set the `Total Volumes` (VolumeCount) field.
+    * The **Apply** checkboxes for both fields will be automatically **ticked**.
 
-### Key Features Maintained
-* **Merge Logic (v2.26):** Unchecked fields are **preserved** in the file. Only **checked** fields are updated.
-* **Date Grouping (v2.26):** Year, Month, Day fields are grouped together for better input flow.
-* **Tickbox Control (v2.0):** Only fields with a **TICKED APPLY CHECKBOX** will be included in the update.
+### 2. View/Import Metadata 🔍
+* **👁️ View Metadata Button:** Click this button when **one file** is selected to see its existing ComicInfo.xml metadata in a new, scrollable, read-only window. Values are **clickable to copy**.
+* **Import Button:** Click "Import Metadata from Selected" (when one file is selected) to populate the main form with that file's data.
 
-### How it Works
-1.  **Load Files:** Use "Add Files..." to load your comics (.cbz or .cbr).
-2.  **Fill & Tick:** Enter metadata and **TICK** the checkboxes next to the fields you want to update.
-3.  **Apply:** Select the files and click "APPLY METADATA to Selected".
+### 3. Core Logic: Tickbox Merge
+* Only fields with a **TICKED APPLY CHECKBOX** will be included in the update.
+* Unticked fields will be **PRESERVED** from the original file.
         """
         
         st.insert("1.0", explanation)
@@ -880,8 +927,33 @@ This version continues the cleanup and standardization of the metadata fields.
             selected_count = len(self.file_listbox.curselection())
             msg = f"Files Loaded: {len(self.files)} | Selected: {selected_count}"
             self.btn_apply.config(state=tk.NORMAL if selected_count > 0 else tk.DISABLED)
+            
+            # Update 'Copy All' and 'View Metadata' button state
+            is_single_selection = selected_count == 1
+            if self.copy_all_btn:
+                self.copy_all_btn.config(state=tk.NORMAL if is_single_selection else tk.DISABLED)
+            if self.view_metadata_btn:
+                 self.view_metadata_btn.config(state=tk.NORMAL if is_single_selection else tk.DISABLED)
 
         self.status_bar.config(text=message or msg)
+
+    def _update_listbox_display(self, selected_indices=None):
+        """Refreshes the listbox content to reflect changes in self.files."""
+        current_selection = self.file_listbox.curselection()
+        
+        self.file_listbox.delete(0, tk.END)
+        for f in self.files:
+            self.file_listbox.insert(tk.END, os.path.basename(f))
+            
+        # Restore previous selection or apply new selection
+        indices_to_select = selected_indices if selected_indices is not None else current_selection
+        for idx in indices_to_select:
+            try:
+                self.file_listbox.select_set(idx)
+            except tk.TclError:
+                pass # Index out of range
+                
+        self.update_status()
 
     def add_files(self):
         """Opens file dialog to select CBZ/CBR files."""
@@ -901,8 +973,7 @@ This version continues the cleanup and standardization of the metadata fields.
             for f in new_files:
                 if f not in self.files:
                     self.files.append(f)
-                    self.file_listbox.insert(tk.END, os.path.basename(f))
-            self.update_status()
+            self._update_listbox_display()
 
     def remove_selected(self):
         """Removes selected files from the list."""
@@ -910,12 +981,99 @@ This version continues the cleanup and standardization of the metadata fields.
         if not selected_indices:
             return
 
+        # Use reversed order to correctly delete from the list
         for index in selected_indices[::-1]:
             del self.files[index]
-            self.file_listbox.delete(index)
             
-        self.update_status()
+        self._update_listbox_display()
         self.clear_fields()
+
+    def move_selected_up(self):
+        """Moves selected items up one position in the list."""
+        selected_indices = list(self.file_listbox.curselection())
+        
+        if not selected_indices or 0 in selected_indices:
+            return
+
+        for i in selected_indices:
+            # Only move if the item directly above it is NOT selected
+            if i > 0 and i - 1 not in selected_indices:
+                # Swap the elements in the underlying list
+                self.files[i], self.files[i-1] = self.files[i-1], self.files[i]
+                
+        # Calculate the new selection indices
+        new_selection = [i - 1 for i in selected_indices if i > 0]
+        # Include any selected indices that were at index 0 (they didn't move)
+        new_selection += [0 for i in selected_indices if i == 0]
+        
+        # Filter and sort the final selection list
+        new_selection = sorted(list(set(new_selection)))
+        
+        self._update_listbox_display(new_selection)
+
+    def move_selected_down(self):
+        """Moves selected items down one position in the list."""
+        selected_indices = list(self.file_listbox.curselection())
+        
+        if not selected_indices or (len(self.files) - 1) in selected_indices:
+            return
+
+        # Iterate in reverse order to ensure indices remain correct during swaps
+        for i in selected_indices[::-1]:
+            # Only move if the item directly below it is NOT selected
+            if i < len(self.files) - 1 and i + 1 not in selected_indices:
+                # Swap the elements in the underlying list
+                self.files[i], self.files[i+1] = self.files[i+1], self.files[i]
+
+        # Calculate the new selection indices
+        new_selection = [i + 1 for i in selected_indices if i < len(self.files) - 1]
+        
+        # Filter and sort the final selection list
+        new_selection = sorted(list(set(new_selection)))
+        
+        self._update_listbox_display(new_selection)
+        
+    def autonumber_selected(self):
+        """
+        Sequentially numbers the selected files based on their order in the list.
+        Updates the 'Volume' and 'VolumeCount' fields and ticks their 'apply' checkboxes.
+        """
+        selected_indices = list(self.file_listbox.curselection())
+        if not selected_indices:
+            messagebox.showwarning("No Selection", "Please select one or more files to set volume numbers.")
+            return
+
+        try:
+            start_num = int(self.autonumber_start_var.get())
+            if start_num <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid Input", "The 'Start Num' must be a positive integer.")
+            return
+            
+        # Get the number of selected files (which will be the VolumeCount)
+        volume_count = len(selected_indices)
+        
+        # The volume field to update
+        volume_var = self.control_vars.get('volume')
+        volume_check = self.control_vars.get('check_volume')
+        
+        # The volume_count field to update
+        volume_count_var = self.control_vars.get('volume_count')
+        volume_count_check = self.control_vars.get('check_volume_count')
+        
+        # Set the total count
+        if volume_count_var and volume_count_check:
+            volume_count_var.set(str(volume_count))
+            volume_count_check.set(1) # Tick the checkbox for Total Volumes
+
+        # Set the starting number in the 'Volume' field
+        if volume_var and volume_check:
+            volume_var.set(str(start_num))
+            volume_check.set(1) # Tick the checkbox for Volume #
+            
+        self.update_status(f"Auto-Voluming set: Start={start_num}, Count={volume_count}. 'Volume #' and 'Total Volumes' fields are ready.")
+
 
     def clear_fields(self):
         """Clears all input fields and unticks all checkboxes."""
@@ -1016,6 +1174,7 @@ This version continues the cleanup and standardization of the metadata fields.
         selected_indices = self.file_listbox.curselection()
         
         if len(selected_indices) != 1:
+            # This check is also done in the button state, but good to keep here
             messagebox.showwarning("Selection Error", "Please select exactly ONE file to import metadata from.")
             return
 
@@ -1079,6 +1238,7 @@ This version continues the cleanup and standardization of the metadata fields.
     def apply_metadata(self):
         """Applies the current metadata values to all selected files."""
         selected_indices = self.file_listbox.curselection()
+        
         if not selected_indices:
             messagebox.showwarning("No Selection", "Please select one or more files to apply metadata.")
             return
@@ -1086,8 +1246,33 @@ This version continues the cleanup and standardization of the metadata fields.
         # Get the fields that the user WANTS to update (i.e., the checked fields)
         gui_metadata_updates = self.get_metadata_values()
         
-        # Check if the user has selected any field to apply
-        if not any(self.control_vars.get(f'check_{k}', tk.IntVar()).get() == 1 for k in self.METADATA_FIELDS):
+        # Check for autovoluming case: if 'volume' and 'volume_count' are checked
+        volume_check = self.control_vars.get('check_volume', tk.IntVar()).get()
+        volume_count_check = self.control_vars.get('check_volume_count', tk.IntVar()).get()
+
+        # Check if the autovoluming condition is met
+        if volume_check == 1 and volume_count_check == 1 and 'volume' in self.control_vars:
+            # Autovoluming is checked and active. We need to iterate and apply the volume sequentially.
+            try:
+                # The bulk form 'volume' field contains the starting number
+                start_num = int(self.control_vars['volume'].get())
+            except ValueError:
+                messagebox.showerror("Invalid Start Num", "Please set a valid positive integer in the 'Volume #' field for autovoluming.")
+                return
+            
+            # Remove volume number from the bulk update dictionary so we can set it per-file
+            if 'volume' in gui_metadata_updates:
+                del gui_metadata_updates['volume'] 
+            
+            gui_metadata_updates['volume_count'] = str(len(selected_indices))
+            
+            autovolume_mode = True
+        else:
+            autovolume_mode = False
+
+        
+        # Final check if any field is ticked (including the volume/volume_count pair)
+        if not gui_metadata_updates and not autovolume_mode:
             messagebox.showwarning("No Fields Selected", "No metadata fields are ticked. Nothing will be updated.")
             return
 
@@ -1109,8 +1294,11 @@ This version continues the cleanup and standardization of the metadata fields.
         error_count = 0
         errors = []
         
-        for i, idx in enumerate(selected_indices):
-            file_path = self.files[idx]
+        current_num = start_num if autovolume_mode else 0
+
+        # Iterate over the selected indices in the display order
+        for i, list_index in enumerate(selected_indices):
+            file_path = self.files[list_index] # Get the file path from the underlying list
             self.update_status(f"Processing file {i+1}/{len(selected_indices)}: {os.path.basename(file_path)}")
             self.root.update_idletasks()
             
@@ -1124,16 +1312,19 @@ This version continues the cleanup and standardization of the metadata fields.
                 merged_metadata = existing_metadata.copy()
                 merged_metadata.update(gui_metadata_updates)
 
-                # 3. Write the merged result
+                # 3. Apply sequential volume number if in autovolume mode
+                if autovolume_mode:
+                    merged_metadata['volume'] = str(current_num)
+                    current_num += 1
+
+                # 4. Write the merged result
                 new_path_str = editor.write_metadata(merged_metadata)
                 
                 if new_path_str:
                     success_count += 1
                     if new_path_str != file_path:
                         # File type changed (CBR -> CBZ), update the list
-                        self.files[idx] = new_path_str
-                        self.file_listbox.delete(idx)
-                        self.file_listbox.insert(idx, os.path.basename(new_path_str))
+                        self.files[list_index] = new_path_str
                 else:
                     error_count += 1
                     errors.append(f"{os.path.basename(file_path)}: Write failed")
@@ -1145,9 +1336,7 @@ This version continues the cleanup and standardization of the metadata fields.
             self.root.update_idletasks()
         
         self.file_listbox.config(state=tk.NORMAL)
-        for idx in selected_indices:
-            # Re-select the processed items
-            self.file_listbox.select_set(idx) 
+        self._update_listbox_display(selected_indices) # Refresh display and re-select
         
         self.btn_apply.config(state=tk.NORMAL)
         self.progress_bar.pack_forget() 
@@ -1172,15 +1361,15 @@ This version continues the cleanup and standardization of the metadata fields.
         """Handle selection changes in the file listbox."""
         selected_indices = self.file_listbox.curselection()
         
-        # Locate the button frame where "Copy All to Main Fields" resides
-        parent_frame = self.file_listbox.master.master 
-        # Assuming button_frame is the second child of the file list's parent frame
-        button_frame = parent_frame.winfo_children()[1] 
+        is_single_selection = len(selected_indices) == 1
         
-        copy_all_btn = next((w for w in button_frame.winfo_children() if w.cget("text") == "Copy All to Main Fields"), None)
+        # Update 'View Metadata' button state based on selection count
+        if self.view_metadata_btn:
+            self.view_metadata_btn.config(state=tk.NORMAL if is_single_selection else tk.DISABLED)
         
-        if copy_all_btn:
-            copy_all_btn.config(state=tk.NORMAL if len(selected_indices) == 1 else tk.DISABLED)
+        # Update 'Import Metadata' button state based on selection count
+        if self.copy_all_btn:
+            self.copy_all_btn.config(state=tk.NORMAL if is_single_selection else tk.DISABLED)
             
         self.update_status()
 
@@ -1189,17 +1378,6 @@ def main():
     """Main function to start the GUI application."""
     root = tk.Tk()
     app = ComicMetadataGUI(root)
-    
-    # Add an extra button to the left pane for Copy All
-    # Find the button frame (it is the second child of the left pane's main frame)
-    parent_frame = app.file_listbox.master.master 
-    button_frame = parent_frame.winfo_children()[1] 
-    
-    # Add a dedicated button for copying all metadata
-    copy_btn = ttk.Button(button_frame, text="Copy All to Main Fields", command=app.copy_all_to_main_fields, state=tk.DISABLED)
-    # This button is placed in the third row, spanning two columns
-    copy_btn.grid(row=2, column=0, columnspan=2, sticky=tk.W+tk.E, padx=2, pady=2)
-    
     root.mainloop()
 
 
