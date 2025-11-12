@@ -10,6 +10,6 @@
     -possibly make it so that you are able to see all the metadata in the programm in addition to also be able to import it into the fields
         -make a seperate window which shows you the metadata of the book seperate from the fields
 
-# Costetic changes I intend to do later
+# Cosmetic changes I intend to do later
     -make tkinter have a less ugly icon
         -maybe use windows iconset for something book-ish
