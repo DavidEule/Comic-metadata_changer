@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-Comic Metadata Bulk Editor - Python GUI Version
-A tool to edit ComicInfo.xml metadata in CBZ/CBR files
-
-Version 2.31: Autovoluming Re-added
-- FIX: Re-integrated the "Autovoluming" and "Manual Sorting" features 
-  that were accidentally removed in the v2.30 layout update.
-- Maintained: "View Metadata" button and clear 3-column button layout.
-- Maintained: Robust merge logic and all ComicRack standard options.
-"""
-
 import os
 import sys 
 import zipfile
@@ -30,8 +18,8 @@ try:
     RARFILE_AVAILABLE = True
 except ImportError:
     RARFILE_AVAILABLE = False
-    print("Warning: rarfile not available. CBR support disabled.")
-    print("Install with: pip install rarfile")
+    # print("Warning: rarfile not available. CBR support disabled.")
+    # print("Install with: pip install rarfile")
     
 try:
     import winsound
@@ -146,7 +134,8 @@ class ComicMetadataEditor:
                         if text_val:
                             metadata[internal_key] = text_val
             except ET.ParseError as e:
-                print(f"XML Parse Error in {self.file_path}: {e}")
+                # print(f"XML Parse Error in {self.file_path}: {e}")
+                pass
         return metadata
 
     def _create_xml(self, metadata: Dict) -> str:
@@ -254,7 +243,7 @@ class ComicMetadataEditor:
             return new_file_path
 
         except Exception as e:
-            print(f"Error writing XML to archive {self.file_path}: {e}")
+            # print(f"Error writing XML to archive {self.file_path}: {e}")
             return None
             
         finally:
@@ -432,6 +421,17 @@ class ComicMetadataGUI:
     """The main application window and logic controller."""
     
     METADATA_FIELDS = ComicMetadataEditor.FIELD_MAPPING
+    
+    # List of keys that are string-based and should support the %n% and %c% placeholders.
+    # Excludes booleans, simple numbers (year/month/day/volume/number/issuecount/rating), and language ISO.
+    STRING_PLACEHOLDER_FIELDS = [
+        'title', 'series', 'alternateSeries', 'storyArc', 'seriesgroup', 
+        'format', 'publisher', 'imprint', 'genre', 'tags', 'writer', 
+        'penciller', 'inker', 'colorist', 'letterer', 'coverartist', 'editor', 
+        'authorsort', 'summary', 'maincharacter', 'characters', 'teams', 
+        'locations', 'notes', 'review', 'scaninformation', 'web', 'country'
+    ]
+
 
     # --- Standard Lists for Comboboxes ---
     ISO_LANGUAGES = [
@@ -673,7 +673,14 @@ class ComicMetadataGUI:
         
         check_apply = ttk.Checkbutton(parent, variable=var_check)
         check_apply.grid(row=row, column=col, sticky=tk.W, padx=(5, 0), pady=2)
-        ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved.")
+        
+        # Append placeholder info to tooltip for relevant fields
+        if internal_key in self.STRING_PLACEHOLDER_FIELDS:
+            extra_tip = "\n\nSupports string formatting:\n- **%n%**: Sequential Number (1, 2, 3...)\n- **%c%**: Total Count"
+            ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved." + extra_tip)
+        else:
+            ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved.")
+
 
         # --- 2. Label ---
         label = ttk.Label(parent, text=label_text)
@@ -724,7 +731,14 @@ class ComicMetadataGUI:
         
         check_apply = ttk.Checkbutton(parent, variable=var_check)
         check_apply.grid(row=row, column=0, sticky=tk.W, padx=(5, 0), pady=2)
-        ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved.")
+        
+        # Append placeholder info to tooltip for relevant fields
+        if internal_key in self.STRING_PLACEHOLDER_FIELDS:
+            extra_tip = "\n\nSupports string formatting:\n- **%n%**: Sequential Number (1, 2, 3...)\n- **%c%**: Total Count"
+            ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved." + extra_tip)
+        else:
+            ToolTip(check_apply, f"Check this box to **APPLY** the field value below to selected files. If unchecked, the existing value will be preserved.")
+
 
         # --- 2. Label (Spans two columns for better look) ---
         label = ttk.Label(parent, text=label_text)
@@ -766,36 +780,36 @@ class ComicMetadataGUI:
 
         # --- Core/Volume/Series Fields (Left Column, below Dates) ---
         left_fields = [
-            ('title', 'Title:', 'entry', None, "The main title of the comic."),
-            ('series', 'Series:', 'entry', None, "The main series name."),
+            ('title', 'Title:', 'entry', None, "The main title of the comic. Use %n% for sequential number and %c% for total count."),
+            ('series', 'Series:', 'entry', None, "The main series name. Use %n% for sequential number and %c% for total count."),
             ('volume', 'Volume #:', 'entry', None, "The volume number (e.g., 1 for Volume 1)."),
             ('volume_count', 'Total Volumes:', 'entry', None, "Total number of volumes in the series."),
             ('number', 'Issue #:', 'entry', None, "The sequential issue number."),
             ('issuecount', 'Total Issues:', 'entry', None, "Total number of issues in the story arc/series."),
             ('seriescomplete', 'Series Complete:', 'checkbutton', None, "Is this series finished? (True/False)"),
-            ('storyArc', 'Story Arc:', 'entry', None, "The name of the overall story arc (e.g., 'The Dark Phoenix Saga')."),
+            ('storyArc', 'Story Arc:', 'entry', None, "The name of the overall story arc (e.g., 'The Dark Phoenix Saga'). Use %n% for sequential number and %c% for total count."),
         ]
         
         # --- Auxiliary/Publisher/Rating Fields (Right Column) ---
         right_fields = [
-            ('publisher', 'Publisher:', 'entry', None, "The comic book publisher."),
-            ('imprint', 'Imprint:', 'entry', None, "The imprint or sub-brand of the publisher."),
-            ('seriesgroup', 'Series Group:', 'entry', None, "A grouping for related series (e.g., 'Marvel Legacy')."),
+            ('publisher', 'Publisher:', 'entry', None, "The comic book publisher. Use %n% for sequential number and %c% for total count."),
+            ('imprint', 'Imprint:', 'entry', None, "The imprint or sub-brand of the publisher. Use %n% for sequential number and %c% for total count."),
+            ('seriesgroup', 'Series Group:', 'entry', None, "A grouping for related series (e.g., 'Marvel Legacy'). Use %n% for sequential number and %c% for total count."),
             # UPDATED: Format now uses a combobox with a list of COMMON_FORMATS
-            ('format', 'Format:', 'combobox', {'values': self.COMMON_FORMATS, 'state': 'normal'}, "Format type (e.g., Digital, Print, Hardcover)."),
+            ('format', 'Format:', 'combobox', {'values': self.COMMON_FORMATS, 'state': 'normal'}, "Format type (e.g., Digital, Print, Hardcover). Use %n% for sequential number and %c% for total count."),
             ('agerating', 'Maturity Rating:', 'combobox', {'values': self.AGE_RATINGS, 'state': 'readonly'}, "The maturity rating for the content."),
             # UPDATED: Manga uses the expanded MANGA_TYPES list
             ('manga', 'Manga:', 'combobox', {'values': self.MANGA_TYPES, 'state': 'readonly'}, "Is this a Manga? Specifies reading direction."),
             ('blackandwhite', 'Black & White:', 'checkbutton', None, "Is the content in black and white? (True/False)"),
             ('language', 'Language (ISO):', 'combobox', {'values': self.ISO_LANGUAGES, 'state': 'normal'}, "Language code (e.g., en, fr)."),
-            ('country', 'Country:', 'combobox', {'values': self.COMMON_COUNTRIES, 'state': 'normal'}, "Country of publication (e.g., USA)."),
-            ('genre', 'Genre:', 'entry', None, "The primary genre (e.g., Action, Sci-Fi)."),
+            ('country', 'Country:', 'combobox', {'values': self.COMMON_COUNTRIES, 'state': 'normal'}, "Country of publication (e.g., USA). Use %n% for sequential number and %c% for total count."),
+            ('genre', 'Genre:', 'entry', None, "The primary genre (e.g., Action, Sci-Fi). Use %n% for sequential number and %c% for total count."),
             ('communityrating', 'Community Rating (0-5):', 'entry', None, "A community or personal rating (e.g., 3.5)."),
             ('gtin', 'GTIN/EAN/ISBN:', 'entry', None, "Product identifier code."),
             ('read', 'Read Status:', 'checkbutton', None, "Has the comic been read? (For tracking purposes)."),
             ('alternatenumber', 'Alt. Number:', 'entry', None, "Alternate issue number for variants or reprints."),
             ('alternateissuecount', 'Alt. Total Issues:', 'entry', None, "Total issues in the alternate series/volume."),
-            ('alternateSeries', 'Alt. Series:', 'entry', None, "Name of an alternate series/volume."),
+            ('alternateSeries', 'Alt. Series:', 'entry', None, "Name of an alternate series/volume. Use %n% for sequential number and %c% for total count."),
         ]
         
         # 1. Date fields (Left column, starting at row 0)
@@ -823,21 +837,21 @@ class ComicMetadataGUI:
         simple_text_start_row += 1 
 
         simple_text_fields = [
-            ('writer', 'Writer:', "The writer(s) of the story."),
-            ('penciller', 'Penciller:', "The artist(s) responsible for the pencils."),
-            ('inker', 'Inker:', "The artist(s) responsible for the inking."),
-            ('colorist', 'Colorist:', "The artist(s) responsible for coloring."),
-            ('letterer', 'Letterer:', "The person(s) responsible for lettering."),
-            ('coverartist', 'Cover Artist:', "The artist(s) who drew the cover."),
-            ('editor', 'Editor:', "The editor(s) responsible for the book."),
-            ('authorsort', 'Author Sort:', "Field used for sorting by author/creator."),
-            ('maincharacter', 'Main Character:', "The central character or team."),
-            ('characters', 'Characters (Comma separated):', "All major characters in the comic."),
-            ('teams', 'Teams (Comma separated):', "All teams featured in the comic."),
-            ('locations', 'Locations (Comma separated):', "Key locations where the story takes place."),
-            ('tags', 'Tags (Comma separated):', "Additional keywords or tags."),
-            ('scaninformation', 'Scan Info:', "Details about the digital scan/source."),
-            ('web', 'Web/URL:', "URL of the comic or source.")
+            ('writer', 'Writer:', "The writer(s) of the story. Use %n% for sequential number and %c% for total count."),
+            ('penciller', 'Penciller:', "The artist(s) responsible for the pencils. Use %n% for sequential number and %c% for total count."),
+            ('inker', 'Inker:', "The artist(s) responsible for the inking. Use %n% for sequential number and %c% for total count."),
+            ('colorist', 'Colorist:', "The artist(s) responsible for coloring. Use %n% for sequential number and %c% for total count."),
+            ('letterer', 'Letterer:', "The person(s) responsible for lettering. Use %n% for sequential number and %c% for total count."),
+            ('coverartist', 'Cover Artist:', "The artist(s) who drew the cover. Use %n% for sequential number and %c% for total count."),
+            ('editor', 'Editor:', "The editor(s) responsible for the book. Use %n% for sequential number and %c% for total count."),
+            ('authorsort', 'Author Sort:', "Field used for sorting by author/creator. Use %n% for sequential number and %c% for total count."),
+            ('maincharacter', 'Main Character:', "The central character or team. Use %n% for sequential number and %c% for total count."),
+            ('characters', 'Characters (Comma separated):', "All major characters in the comic. Use %n% for sequential number and %c% for total count."),
+            ('teams', 'Teams (Comma separated):', "All teams featured in the comic. Use %n% for sequential number and %c% for total count."),
+            ('locations', 'Locations (Comma separated):', "Key locations where the story takes place. Use %n% for sequential number and %c% for total count."),
+            ('tags', 'Tags (Comma separated):', "Additional keywords or tags. Use %n% for sequential number and %c% for total count."),
+            ('scaninformation', 'Scan Info:', "Details about the digital scan/source. Use %n% for sequential number and %c% for total count."),
+            ('web', 'Web/URL:', "URL of the comic or source. Use %n% for sequential number and %c% for total count.")
         ]
         
         # Use columns 0-2 (left group) for crew/text fields
@@ -853,9 +867,9 @@ class ComicMetadataGUI:
         text_start_row += 1 
 
         long_text_fields = [
-            ('summary', 'Summary:', "A brief description of the comic's plot."),
-            ('notes', 'Notes:', "General notes about the file or comic."),
-            ('review', 'Review:', "A personal review or rating for the comic."),
+            ('summary', 'Summary:', "A brief description of the comic's plot. Use %n% for sequential number and %c% for total count."),
+            ('notes', 'Notes:', "General notes about the file or comic. Use %n% for sequential number and %c% for total count."),
+            ('review', 'Review:', "A personal review or rating for the comic. Use %n% for sequential number and %c% for total count."),
         ]
         
         current_row = text_start_row
@@ -890,11 +904,17 @@ This version re-integrates the **Autovoluming** and **Manual Sorting** tools alo
     * It will also calculate and set the `Total Volumes` (VolumeCount) field.
     * The **Apply** checkboxes for both fields will be automatically **ticked**.
 
-### 2. View/Import Metadata 🔍
+### 2. NEW: Sequential String Formatting 📝
+* Use the placeholder **`%n%`** in any major text field (like **Title**, **Series**, **Writer**, **Summary**, etc.).
+    * When applying metadata, **`%n%`** will be replaced by the sequential number of the file in the current selection.
+    * For example, setting **Title** to `"Bookname - Volume %n%"` will result in `"Bookname - Volume 1"`, `"Bookname - Volume 2"`, etc., for the selected files.
+* Use the placeholder **`%c%`** to insert the total count of selected files.
+
+### 3. View/Import Metadata 🔍
 * **👁️ View Metadata Button:** Click this button when **one file** is selected to see its existing ComicInfo.xml metadata in a new, scrollable, read-only window. Values are **clickable to copy**.
 * **Import Button:** Click "Import Metadata from Selected" (when one file is selected) to populate the main form with that file's data.
 
-### 3. Core Logic: Tickbox Merge
+### 4. Core Logic: Tickbox Merge
 * Only fields with a **TICKED APPLY CHECKBOX** will be included in the update.
 * Unticked fields will be **PRESERVED** from the original file.
         """
@@ -1237,7 +1257,7 @@ This version re-integrates the **Autovoluming** and **Manual Sorting** tools alo
 
     def apply_metadata(self):
         """Applies the current metadata values to all selected files."""
-        selected_indices = self.file_listbox.curselection()
+        selected_indices = list(self.file_listbox.curselection())
         
         if not selected_indices:
             messagebox.showwarning("No Selection", "Please select one or more files to apply metadata.")
@@ -1249,29 +1269,27 @@ This version re-integrates the **Autovoluming** and **Manual Sorting** tools alo
         # Check for autovoluming case: if 'volume' and 'volume_count' are checked
         volume_check = self.control_vars.get('check_volume', tk.IntVar()).get()
         volume_count_check = self.control_vars.get('check_volume_count', tk.IntVar()).get()
-
+        
         # Check if the autovoluming condition is met
+        autovolume_mode = False
+        start_num = 0
         if volume_check == 1 and volume_count_check == 1 and 'volume' in self.control_vars:
-            # Autovoluming is checked and active. We need to iterate and apply the volume sequentially.
             try:
-                # The bulk form 'volume' field contains the starting number
                 start_num = int(self.control_vars['volume'].get())
+                autovolume_mode = True
             except ValueError:
                 messagebox.showerror("Invalid Start Num", "Please set a valid positive integer in the 'Volume #' field for autovoluming.")
                 return
             
-            # Remove volume number from the bulk update dictionary so we can set it per-file
+            # The bulk form's volume value is the start number, so remove it from the bulk update dictionary 
+            # to be handled sequentially, but keep the volume_count.
             if 'volume' in gui_metadata_updates:
                 del gui_metadata_updates['volume'] 
             
             gui_metadata_updates['volume_count'] = str(len(selected_indices))
-            
-            autovolume_mode = True
-        else:
-            autovolume_mode = False
 
-        
-        # Final check if any field is ticked (including the volume/volume_count pair)
+
+        # Final check if any field is ticked 
         if not gui_metadata_updates and not autovolume_mode:
             messagebox.showwarning("No Fields Selected", "No metadata fields are ticked. Nothing will be updated.")
             return
@@ -1294,12 +1312,27 @@ This version re-integrates the **Autovoluming** and **Manual Sorting** tools alo
         error_count = 0
         errors = []
         
-        current_num = start_num if autovolume_mode else 0
+        current_num = start_num if autovolume_mode else 1 # Start sequential numbering at 1, unless autovolume is active
 
+        # Store string fields that require formatting for quick lookup
+        string_fields_to_format: Dict[str, str] = {
+            k: v for k, v in gui_metadata_updates.items() 
+            if k in self.STRING_PLACEHOLDER_FIELDS and (
+                '%n%' in v or '%c%' in v
+            )
+        }
+        
+        # Total count for the %c% placeholder
+        total_count_str = str(len(selected_indices))
+        
         # Iterate over the selected indices in the display order
         for i, list_index in enumerate(selected_indices):
             file_path = self.files[list_index] # Get the file path from the underlying list
-            self.update_status(f"Processing file {i+1}/{len(selected_indices)}: {os.path.basename(file_path)}")
+            
+            # The sequential number for this file (starts at 1)
+            file_sequence_num = i + 1
+            
+            self.update_status(f"Processing file {file_sequence_num}/{total_count_str}: {os.path.basename(file_path)}")
             self.root.update_idletasks()
             
             try:
@@ -1310,14 +1343,30 @@ This version re-integrates the **Autovoluming** and **Manual Sorting** tools alo
                 
                 # 2. Merge: Start with existing data, then overwrite/add only the new, checked values
                 merged_metadata = existing_metadata.copy()
-                merged_metadata.update(gui_metadata_updates)
-
+                merged_metadata.update(gui_metadata_updates) # Add all fixed (non-sequential) updates
+                
                 # 3. Apply sequential volume number if in autovolume mode
                 if autovolume_mode:
                     merged_metadata['volume'] = str(current_num)
                     current_num += 1
 
-                # 4. Write the merged result
+                # 4. Apply string formatting to relevant fields
+                for key, template_value in string_fields_to_format.items():
+                    # If autovolume is NOT active, we use the simple sequence number (i+1) for %n%
+                    # If autovolume IS active, %n% is implicitly the same as the autovolume sequence (current_num - 1, since it's incremented already) 
+                    # For simplicity, we use the file_sequence_num (i+1) for the %n% placeholder replacement.
+                    # This lets the user apply a completely separate number sequence from volume, or the same one.
+                    
+                    # NOTE: The %n% number here is (i+1) which is the file's index in the *selected list* + 1.
+                    # If Autovolume is active, the 'volume' field uses its own sequence (current_num).
+                    
+                    formatted_value = template_value.replace('%n%', str(file_sequence_num))
+                    formatted_value = formatted_value.replace('%c%', total_count_str)
+                    
+                    if formatted_value != template_value:
+                        merged_metadata[key] = formatted_value
+                    
+                # 5. Write the merged result
                 new_path_str = editor.write_metadata(merged_metadata)
                 
                 if new_path_str:
@@ -1382,4 +1431,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # Suppress the warning print when rarfile is missing on execution
+    # if not RARFILE_AVAILABLE:
+    #     sys.stderr.write("Warning: rarfile not available. CBR support disabled.\n")
+    #     sys.stderr.write("Install with: pip install rarfile\n")
+        
     main()
